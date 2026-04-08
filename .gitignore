@@ -1,1 +1,13 @@
-rough.ipynb
+# env
+.env
+
+# virtual environment
+.venv
+
+# other
+__pycache__/
+.vscode/
+
+# my files
+Notes
+logs
