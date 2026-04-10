@@ -29,6 +29,7 @@ load_dotenv()
 
 from logging_setup import get_logger
 logger = get_logger(__name__, log_file="llm.log")
+
 # ==========================================
 # Variable Configuration
 # ==========================================
@@ -41,8 +42,9 @@ MAX_RETRIES = 3
 MAX_TOKEN_LIMIT = 8192
 EMBEDDING_DIMENSIONS = 1536
 RETRY_BACKOFF_BASE = 2.0
+
 # ==========================================
-# Base Architecture
+# ABSTRACT BASE  (shared across all 8 agents)
 # ==========================================
 class BaseAIAgent(ABC):
     """Abstract base class defining the shared contract for all 8 AI agents."""
@@ -105,7 +107,7 @@ class LLMInput(BaseModel):
         description="Optional system-level instructions to guide the model's behavior."
     )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Creativity threshold.")
-    max_tokens: int = Field(default=2048, ge=1, le=4096, description="Maximum tokens to generate in the output.")
+    max_completion_tokens: int = Field(default=2048, ge=1, le=4096, description="Maximum tokens to generate in the output.")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional contextual information for processing.")
 
     @field_validator('prompt')
@@ -271,7 +273,7 @@ class TransformerStage:
     def run(self, llm_input: LLMInput, retry_fn) -> TransformerResult:
         logger.info(
             f"⚙️  [TRANSFORMER] Invoking {CHAT_MODEL} | "
-            f"temp={llm_input.temperature} | max_tokens={llm_input.max_tokens}"
+            f"temp={llm_input.temperature} | max_completion_tokens={llm_input.max_completion_tokens}"
         )
         t0 = time.perf_counter()
         
@@ -283,7 +285,7 @@ class TransformerStage:
                 {"role": "user", "content": llm_input.prompt}
             ],
             temperature=llm_input.temperature,
-            max_tokens=llm_input.max_tokens
+            max_completion_tokens=llm_input.max_completion_tokens
         )
         choice = response.choices[0]
         usage = response.usage.total_tokens
@@ -410,7 +412,7 @@ if __name__ == "__main__":
         prompt="""Explain the self-attention mechanism in exactly 3 bullet points, each no longer than two sentences.""",
         system_prompt="""You are a senior machine learning researcher. Respond with precision and clarity. Use bullet points when instructed.""",
         temperature=0.4,
-        max_tokens=512,
+        max_completion_tokens=512,
         metadata={"source": "llm_agent_demo", "version": "1.0.0"},
     )
 
