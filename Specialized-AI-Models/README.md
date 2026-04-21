@@ -1,5 +1,4 @@
-# 🧠 Specialized AI Agents
-
+<h1 align="center">🧠 Specialized AI Agents</h1>
 A modular, production-grade repository showcasing distinct AI agent architectures. Built with a focus on type safety, observability, and deterministic stage execution.
 
 ## Table of Contents
@@ -155,4 +154,3 @@ graph LR
 - Logs are sanitized locally. Ensure `system_prompt` and Pydantic object dumps do not expose user PII.
 
 <p align="center">Made with ❤️ by Jiten.</p>
-Made with ❤️ by Jiten.
