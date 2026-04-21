@@ -39,7 +39,7 @@ create .env file and refer .env.example
 Run a quick example (replace with actual runner or script):
 
 ```bash
-python LLM.py
+python3 LLM.py
 ```
 
 ## Architecture Overview
