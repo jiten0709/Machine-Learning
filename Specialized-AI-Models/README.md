@@ -154,4 +154,5 @@ graph LR
 - Do not commit `.env` files.
 - Logs are sanitized locally. Ensure `system_prompt` and Pydantic object dumps do not expose user PII.
 
-Made with ❤️ by
+<p align="center">Made with ❤️ by Jiten.</p>
+Made with ❤️ by Jiten.
