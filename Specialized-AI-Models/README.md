@@ -1,28 +1,41 @@
-# Specialized AI Agents
+# 🧠 Specialized AI Agents
 
-A compact, modular repository showcasing 8 different specialized AI agents. Each component is designed to be replaceable, observable, and testable.
+A modular, production-grade repository showcasing distinct AI agent architectures. Built with a focus on type safety, observability, and deterministic stage execution.
 
 ## Table of Contents
 
+- Technical Stack
 - Project Overview
 - Quickstart
 - Agent: LLM (Large Language Model)
-- Files and Structure
+- Agent: LCM (Large Concept Model)
+- Agent: LAM (Large Action Model)
 - Logging & Observability
 - Contributing
+- Security & Secrets
 
-## Project Overview
+## ⚙️ Technical Stack
 
-This project demonstrates a clear, stage-oriented LLM pipeline where each stage is a discrete unit (ingest, tokenization, embedding, transformer, output). The architecture emphasizes validation, logging, and the ability to swap implementations (mock vs. production).
+- **Core**: Python 3.11+, Pydantic v2, ABC (Abstract Base Classes)
+- **AI/ML**: OpenAI API (gpt-4o, text-embedding-3-small), NLTK, tiktoken
+- **Infra**: `uv` package manager, `.env` for secrets management
 
-## Quickstart
+## 🏗 Project Overview
 
-Requirements:
+This architecture treats AI pipelines as strict, sequential data contracts. Each stage is a discrete, validated component.
 
-- Python 3.11+
-- Virtual environment recommended
+Design guarantees:
 
-Install:
+- **Type Safety**: Pydantic models validate all inputs and outputs between pipeline stages.
+- **Resiliency**: Exponential backoff and retry logic for API calls.
+- **Modularity**: Abstract base classes (`BaseAIAgent`) enforce a uniform interface.
+- **Observability**: Structured, per-stage logging with execution timings.
+
+## 🚀 Quickstart
+
+**Prerequisites:** Python 3.11+
+
+**Installation:**
 
 ```bash
 uv venv
@@ -30,59 +43,115 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-Setup necessary environment variables:
+**Configuration:**
 
-```
-create .env file and refer .env.example
+```bash
+cp .env.example .env
+# Edit .env with your GITHUB_TOKEN and GITHUB_ENDPOINT
 ```
 
-Run a quick example (replace with actual runner or script):
+**Execution:**
 
 ```bash
 python3 LLM.py
 ```
 
-## Architecture Overview
+## 🔵 Agent 1: LLM (Large Language Model)
 
-Design principles:
+A strict-pipeline conversational agent.
 
-- Each pipeline stage is a first-class, logged, validated component.
-- Pydantic models enforce input/output schemas.
-- Swap in real providers easily (OpenAI, local models, or mocked functions).
-- Fine-grained logging for observability and debugging.
+**Pipeline Flow:**
 
-## Agent: LLM — Large Language Model
+```mermaid
+graph LR
+    A[Input] --> B[Tokenization]
+    B --> C[Embedding]
+    C --> D[Transformer]
+    D --> E[Output]
+```
 
-🔵 Agent 1: LLM — Large Language Model
+| Stage            | Implementation                                    | Data Contract       |
+| :--------------- | :------------------------------------------------ | :------------------ |
+| **Input**        | Raw text ingestion & validation                   | `LLMInput`          |
+| **Tokenization** | Real token counting & truncation via `tiktoken`   | `TokenizedResult`   |
+| **Embedding**    | Semantic vectorization (`text-embedding-3-small`) | `EmbeddingResult`   |
+| **Transformer**  | Attention-based generation (`gpt-4o` family)      | `TransformerResult` |
+| **Output**       | Aggregated pipeline metadata and final text       | `LLMOutput`         |
 
-📐 Architecture Breakdown
+## 🟢 Agent 2: LCM (Large Concept Model)
 
-Based on the project diagram, the LLM pipeline follows this strict sequential flow:
-Input → Tokenization → Embedding → Transformer → Output
+An advanced agent operating in latent concept space rather than surface token space.
 
-| Stage        |                                    Role | Implementation Strategy          |
-| ------------ | --------------------------------------: | -------------------------------- |
-| Input        |         Raw text ingestion & validation | Pydantic model with guardrails   |
-| Tokenization | Simulate token count, chunking strategy | tiktoken for real token counting |
-| Embedding    |          Semantic vector representation | OpenAI text-embedding-3-small    |
-| Transformer  |  Attention-based reasoning & generation | OpenAI gpt-4.1                   |
-| Output       |          Structured, validated response | Pydantic output model + metadata |
+**Pipeline Flow:**
 
-## Logging & Observability
+```mermaid
+graph LR
+    A[Input] --> B[Sentence Segmentation]
+    B --> C[SONAR Embedding]
+    C --> D[Diffusion]
+    D --> E[Advanced Patterning]
+    D --> F[Hidden Process]
+    E --> G[Quantization]
+    F --> G
+    G --> H[Output]
+```
 
-- Centralized logger configured in logging_setup.py.
+| Stage               | Implementation                                     | Data Contract              |
+| :------------------ | :------------------------------------------------- | :------------------------- |
+| **Segmentation**    | Atomic unit splitting via NLTK `punkt`             | `SegmentationResult`       |
+| **SONAR Embedding** | Per-sentence OpenAI embeddings + mean pooling      | `SonarEmbeddingResult`     |
+| **Diffusion**       | DDPM-inspired Gaussian noise refinement            | `DiffusionResult`          |
+| **Patterning**      | Structural maps via abstract prompt instruction    | `AdvancedPatterningResult` |
+| **Hidden Process**  | Cosine similarity clustering & cross-inference     | `HiddenProcessResult`      |
+| **Quantization**    | 8-bit uniform scalar quantization for state limits | `QuantizationResult`       |
+| **Output**          | Full state aggregation and structural summary      | `LCMOutput`                |
 
-Logs are written to logs/\<filename>.log by default.
+## 🟠 Agent 3: LAM (Large Action Model)
 
-## Contributing
+An "executive function" agent that operates in _action space_ rather than token space. It handles complex, multi-step tasks requiring dynamic planning, persistent memory, and deterministic symbolic reasoning.
 
-- Open an issue for major changes or architecture proposals.
-- Small bugfixes and docs improvements: open a PR with a short description and tests if applicable.
-- Maintain backward-compatible changes for adapter interfaces.
+**Pipeline Flow:**
 
-## Security & Secrets
+```mermaid
+graph LR
+    A[Input] --> B[Perception]
+    B --> C[Intent Recognition]
+    C --> D[Task Breakdown]
+    D --> E[Action Planning]
+    E <--> F[Memory System]
+    E <--> G[Neuro-Symbolic]
+    F <--> G
+    G --> H[Feedback Integration]
+    H --> I[Output]
+```
 
-- Do not commit API keys or secrets. Use .env and .env.example for guidance.
-- Sanitize logs: never log raw secrets or full user inputs in plaintext.
+| Stage                  | Implementation                                         | Data Contract               |
+| :--------------------- | :----------------------------------------------------- | :-------------------------- |
+| **Input**              | Natural language instruction & environment config      | `LAMInput`                  |
+| **Perception**         | Environmental observation & complexity scoring         | `PerceptionResult`          |
+| **Intent Recognition** | Goal extraction & sub-goal decomposition               | `IntentRecognitionResult`   |
+| **Task Breakdown**     | Directed atomic task graph & critical path computation | `TaskBreakdownResult`       |
+| **Action Planning**    | Tool-grounded, sequential action synthesis             | `ActionPlanResult`          |
+| **Memory System**      | Episodic (events) & semantic (facts) working memory    | `MemorySystemResult`        |
+| **Neuro-Symbolic**     | Neural checking + deterministic safety rule predicates | `NeuroSymbolicResult`       |
+| **Feedback**           | Execution simulation & adaptive replanning loops       | `FeedbackIntegrationResult` |
+| **Output**             | Executable action plan aggregation & final summary     | `LAMOutput`                 |
 
-# Made with ❤️ by Jiten.
+## 📊 Logging & Observability
+
+- Centralized logger configured via `logging_setup.py`.
+- Execution timings are tracked at the nanosecond level per stage using `time.perf_counter()`.
+- Output is written locally to `logs/<agent_name>.log`.
+
+## 🤝 Contributing
+
+- Open an issue for architectural proposals.
+- Maintain backward compatibility with the `BaseAIAgent` abstract interface.
+- Ensure strict Pydantic v2 schema adherence for new data contracts.
+
+## 🔒 Security & Secrets
+
+- Do not commit `.env` files.
+- Logs are sanitized locally. Ensure `system_prompt` and Pydantic object dumps do not expose user PII.
+
+Made with ❤️ by

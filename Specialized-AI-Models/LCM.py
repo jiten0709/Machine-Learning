@@ -2,7 +2,7 @@
 LCM AGENT — Large Concept Model
 
 Pipeline:
-Input → Sentence Segmentation → SONAR Embedding → Diffusion → Advanced Patterning ⟷ Hidden Process → Quantization → Output
+Input → Sentence Segmentation → SONAR Embedding → Diffusion → [Advanced Patterning ⟷ Hidden Process] → Quantization → Output
 
 Model: gpt-4.1 + text-embedding-3-small (SONAR-style pooling)
 Standard: Production-Grade | Pydantic v2 | ABC | Retry Logic
