@@ -1,4 +1,4 @@
-"""LAM AGENT — Large Action Model (Agent 3 of 8)
+"""LAM AGENT — Large Action Model
 
 Pipeline: Input → Perception → Intent Recognition → Task Breakdown →
           [Action Planning ↔ Memory System ↔ Neuro-Symbolic Integration] →
@@ -16,23 +16,27 @@ Features:
 - Production-grade | Pydantic v2 | ABC | State Checkpointing | Robust retry logic | Structured logging
 """
 
+import time, uuid, json, os, textwrap, re
 from abc import ABC, abstractmethod
-from typing import Any, Deque
+from typing import Any, Deque, Callable, Dict, List, Optional, Tuple
 from collections import deque
-from openai import OpenAI, RateLimitError, APITimeoutError, APIError
-import time
+from openai import OpenAI, RateLimitError, APITimeoutError, APIError, APIConnectionError
 from datetime import datetime, timezone
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
-import uuid
-import json
+from pathlib import Path
 
-import os
-from dotenv import load_dotenv
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    raise ImportError("❌ No env file found. Please create a .env file.")
 
 from logging_setup import get_logger
+import logging
 logger = get_logger(__name__, log_file="lam.log")
+def _ltag(tag: str, level: int, msg: str, lgr: logging.Logger = logger) -> None:
+    lgr.log(level, msg, extra={"tag": tag})
 
 # ==========================================
 # Variable Configuration
@@ -41,11 +45,15 @@ TOKEN = os.environ['GITHUB_TOKEN']
 ENDPOINT = os.environ['GITHUB_ENDPOINT']
 CHAT_MODEL = os.environ['GITHUB_MODEL_NAME']
 EMBEDDING_MODEL = os.environ['GITHUB_EMBED_NAME']
+
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2.0
 MAX_FEEDBACK_ITERATIONS = 3 # max re-plan cycles in feedback loop
 MEMORY_EPISODIC_LIMIT = 50 # max episodic memory slots
 MEMORY_SEMANTIC_LIMIT = 100 # max semantic fact slots
+
+CHECKPOINT_DIR = Path("./checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 PERCEPTION_PROMPT_TEMPLATE = """
 Instruction: {instruction}
@@ -126,6 +134,7 @@ Tasks:
 {tasks_text}
 Available Tools: {available_tools}
 Constraints: {constraints}
+Memory Context: {memory_context}
 
 For each task generate one or more actions.
 
@@ -145,6 +154,29 @@ Respond with:
 }}
 """
 
+ACTION_REPLAN_PROMPT_TEMPLATE = """
+Goal: {primary_goal}
+FAILED Actions (require correction):
+{failed_actions}
+Memory Context: {memory_context}
+Constraints: {constraints}
+Correction Hints: {corrections}
+
+Generate replacement actions ONLY for the failed ones. Respond with:
+{{
+  "actions": [
+    {{
+      "task_id": "<task_id>",
+      "step": <integer>,
+      "tool": "<tool>",
+      "parameters": {{"key": "value"}},
+      "expected_output": "<expected>",
+      "rationale": "<rationale>"
+    }}
+  ]
+}}
+"""
+
 FEEDBACK_PROMPT_TEMPLATE = """
 You are an action execution simulator. Simulate running the given action and determine if it would succeed. JSON only.
 
@@ -159,6 +191,43 @@ Simulate this action and respond with:
   "success": <true|false>,
   "correction": "<if failed, corrective suggestion, else null>"
 }}"""
+
+NEURO_SYMBOLIC_REASONING_TEMPLATE = """
+You are a symbolic reasoning validator for an autonomous agent.
+The following symbolic rules have been evaluated against the action plan:
+
+Triggered Violations:
+{violations_text}
+
+Action Plan Summary:
+{action_summary}
+
+Goal: {primary_goal}
+User Constraints: {user_constraints}
+
+Given these violations, assess:
+1. Whether the plan is overall safe and feasible
+2. Which specific actions need modification
+3. What concrete remediation steps are required
+
+Be precise. One paragraph.
+"""
+
+MEMORY_RELEVANCE_PROMPT = """
+You are a memory retrieval system. Score each memory entry's relevance to the current goal.
+
+Current Goal: {goal}
+
+Memories:
+{memories_text}
+
+Return JSON only:
+{{
+  "scored": [
+    {{"id": "<memory_id>", "relevance": <0.0-1.0>, "reason": "<one phrase>"}}
+  ]
+}}
+"""
 
 # ==========================================
 # Enums
@@ -194,6 +263,11 @@ class IntentType(str, Enum):
     AUTOMATION = "AUTOMATION"
     DECISION_MAKING = "DECISION_MAKING"
 
+class PipelineStatus(str, Enum):
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    PARTIAL = "PARTIAL"
+
 # ==========================================
 # Pydantic Models
 # ==========================================
@@ -214,7 +288,7 @@ class LAMInput(BaseModel):
     def validate_instruction(cls, v: str) -> str:
         stripped = v.strip()
         if not stripped:
-            raise ValueError("Instruction cannot be empty.")
+            raise ValueError("🚨 Instruction cannot be empty.")
         return stripped
 
     @model_validator(mode="after")
@@ -255,7 +329,7 @@ class IntentRecognitionResult(BaseModel):
     primary_goal: str = Field(..., description="Primary goal extracted from the instruction.")
     sub_goals: list[SubGoal] = Field(default_factory=list, description="List of decomposed sub-goals.")
     extracted_entities: list[str] = Field(default_factory=list, description="Key entities extracted from the instruction.")
-    temporal_constraint: str | None = Field(default=None, description="Any temporal constraint (deadline) identified in the instruction.")
+    temporal_constraint: Optional[str]= Field(default=None, description="Any temporal constraint (deadline) identified in the instruction.")
     confidence: float = Field(ge=0.0, le=1.0, description="Confidence level of the intent recognition (0.0 to 1.0).")
     processing_time: float = Field(description="Time taken to process the intent recognition stage in seconds.")
 
@@ -285,7 +359,7 @@ class Action(BaseModel):
     task_id: str = Field(..., description="Identifier of the atomic task this action implements.")
     step: int = Field(..., description="Execution step number for this action.")
     tool: str = Field(..., description="Tool to be used for executing this action.")
-    parameters: dict[str, Any] = Field(default_factory=dict, description="Parameters required for executing the action.")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Parameters required for executing the action.")
     expected_output: str = Field(..., description="Expected output or result from executing this action.")
     status: ActionStatus = Field(default=ActionStatus.PENDING, description="Current execution status of the action.")
     rationale: str = Field(..., description="Rationale for why this action is necessary and how it contributes to the overall goal.")
@@ -293,7 +367,7 @@ class Action(BaseModel):
 class ActionPlanResult(BaseModel):
     """Stage 5 - Action Planning output"""
     stage: str = "ACTION_PLANNING"
-    actions: list[Action] = Field(default_factory=list, description="List of planned actions ready for execution.")
+    actions: List[Action] = Field(default_factory=list, description="List of planned actions ready for execution.")
     action_count: int = Field(description="Total number of actions in the plan.")
     estimated_total_steps: int = Field(description="Estimated total number of execution steps required to complete the plan.")
     processing_time: float = Field(description="Time taken to process the action planning stage in seconds.")
@@ -317,8 +391,8 @@ class SemanticMemory(BaseModel):
 class MemorySystemResult(BaseModel):
     """Stage 6 - Memory System output"""
     stage: str = "MEMORY_SYSTEM"
-    episodic_memories: list[EpisodicMemory] = Field(default_factory=list, description="List of episodic memories stored.")
-    semantic_memories: list[SemanticMemory] = Field(default_factory=list, description="List of semantic facts stored.")
+    episodic_memories: List[EpisodicMemory] = Field(default_factory=list, description="List of episodic memories stored.")
+    semantic_memories: List[SemanticMemory] = Field(default_factory=list, description="List of semantic facts stored.")
     relevant_context: str = Field(..., description="Relevant contextual information retrieved from memory to inform action planning.")
     memory_hits: int = Field(description="Number of memory entries retrieved that were relevant to the current task.")
     processing_time: float = Field(description="Time taken to process the memory system stage in seconds.")
@@ -329,17 +403,17 @@ class SymbolicConstraint(BaseModel):
     constraint_id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8], description="Unique identifier for the symbolic constraint.")
     constraint_type: ConstraintType = Field(..., description="Type of the constraint (e.g., SAFETY, FEASIBILITY).")
     rule: str = Field(..., description="The symbolic rule or logic that must be satisfied during action execution.")
-    applies_to: list[str] = Field(default_factory=list, description="List of action_ids that this constraint applies to.")
+    applies_to: List[str] = Field(default_factory=list, description="List of action_ids that this constraint applies to.")
     is_satisfied: bool = Field(default=False, description="Whether the constraint is currently satisfied based on the planned actions and memory context.")
-    violation_detail: str | None = Field(default=None, description="If the constraint is violated, details about the violation.")
+    violation_detail: Optional[str] = Field(default=None, description="If the constraint is violated, details about the violation.")
 
 class NeuroSymbolicResult(BaseModel):
     """Stage 7 - Neuro-Symbolic Integration output"""
     stage: str = "NEURO_SYMBOLIC_INTEGRATION"
-    constraints_checked: list[SymbolicConstraint] = Field(default_factory=list, description="List of symbolic constraints that were checked against the action plan.")
+    constraints_checked: List[SymbolicConstraint] = Field(default_factory=list, description="List of symbolic constraints that were checked against the action plan.")
     violations_found: int = Field(description="Number of symbolic constraint violations found during validation.")
-    blocked_actions: list[str] = Field(default_factory=list, description="List of action_ids that are blocked due to constraint violations.")
-    approved_actions: list[str] = Field(default_factory=list, description="List of action_ids that are approved for execution after validation.")
+    blocked_actions: List[str] = Field(default_factory=list, description="List of action_ids that are blocked due to constraint violations.")
+    approved_actions: List[str] = Field(default_factory=list, description="List of action_ids that are approved for execution after validation.")
     symbolic_reasoning: str = Field(..., description="Explanation of the symbolic reasoning process and how constraints were applied to the action plan.")
     processing_time: float = Field(description="Time taken to process the neuro-symbolic integration stage in seconds.")
 
@@ -350,13 +424,13 @@ class FeedbackEntry(BaseModel):
     action_id: str = Field(..., description="Identifier of the action that was executed.")
     simulated_result: str = Field(..., description="Simulated result of executing the action.")
     success: bool = Field(..., description="Whether the simulated execution was successful.")
-    correction: str | None = Field(default=None, description="If the execution failed, a suggested correction or adjustment to the action plan.")
+    correction: Optional[str] = Field(default=None, description="If the execution failed, a suggested correction or adjustment to the action plan.")
 
 class FeedbackIntegrationResult(BaseModel):
     """Stage 8 - Feedback Integration output"""
     stage: str = "FEEDBACK_INTEGRATION"
     iterations: int = Field(description="Number of feedback iterations completed.")
-    feedback_log: list[FeedbackEntry] = Field(default_factory=list, description="Log of feedback entries from each iteration.")
+    feedback_log: List[FeedbackEntry] = Field(default_factory=list, description="Log of feedback entries from each iteration.")
     replanning_count: int = Field(description="Number of times the action plan was replanned based on feedback.")
     final_plan_valid: bool = Field(..., description="Whether the final action plan is considered valid and executable after feedback integration.")
     execution_summary: str = Field(..., description="Summary of the simulated execution process and how feedback was integrated to refine the plan.")
@@ -367,7 +441,7 @@ class LAMOutput(BaseModel):
     """Final structured output of the full LAM pipeline."""
     request_id: str = Field(..., description="Unique identifier for the request, matching the input request_id.")
     stage: str = "OUTPUT"
-    status: str = "COMPLETED"
+    status: PipelineStatus = Field(default=PipelineStatus.COMPLETED, description="Overall status of the LAM pipeline execution.")
 
     # stage payloads
     perception: PerceptionResult
@@ -379,10 +453,10 @@ class LAMOutput(BaseModel):
     feedback: FeedbackIntegrationResult
 
     # final dependencies
-    executable_action_plan: list[Action] = Field(default_factory=list, description="List of actions that are approved and executable after the full LAM pipeline processing.")
+    executable_action_plan: List[Action] = Field(default_factory=list, description="List of actions that are approved and executable after the full LAM pipeline processing.")
     final_summary: str = Field(..., description="Concise summary of the entire LAM process, the final action plan, and the expected outcome.")
     total_pipeline_time: float = Field(description="Total time taken to process the entire LAM pipeline in seconds.")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata about the LAM execution, such as resource usage, model versions, etc.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata about the LAM execution, such as resource usage, model versions, etc.")
 
     @model_validator(mode="after")
     def populate_metadata(self) -> "LAMOutput":
@@ -400,7 +474,7 @@ class LAMOutput(BaseModel):
 class BaseAIAgent(ABC):
     """Abstract base class defining the shared contract for all 8 AI agents."""
 
-    def __init__(self, client: OpenAI | None):
+    def __init__(self, client: Optional[OpenAI] = None) -> None:
         if client is not None:
             self.client = client
         else:
@@ -408,42 +482,53 @@ class BaseAIAgent(ABC):
                 base_url=ENDPOINT,
                 api_key=TOKEN,
             )
-        self.logger = get_logger(__name__, log_file="lcm.log")
+        self.logger = get_logger(__name__, log_file="lam.log")
     
     @abstractmethod
     def process(self, input_data: Any) -> Any:
         """Core execution pipeline to be implemented by each specialized agent."""
         ...
 
-    def _retry_api_call(self, fn, *args, **kwargs):
+    def _retry_api_call(self, fn: Callable, *args, **kwargs) -> Any:
         """
         Exponential-backoff retry wrapper for any OpenAI API call.
         Handles: RateLimitError, APITimeoutError, APIError.
         """
+        last_exc: Optional[Exception] = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return fn(*args, **kwargs)
             except RateLimitError as e:
                 wait = RETRY_BACKOFF_BASE ** attempt
                 self.logger.warning(
-                    f"🔄 Rate limit hit (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Retrying in {wait}s... | {e}"
+                    f"🚨 Rate-limit (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
                 )
                 time.sleep(wait)
-            except APITimeoutError as e:
-                wait = RETRY_BACKOFF_BASE ** attempt
+                last_exc = e
+            except APIConnectionError as e:       # FIX-05
+                wait = RETRY_BACKOFF_BASE * attempt
                 self.logger.warning(
-                    f"⏱️  Timeout (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Retrying in {wait}s... | {e}"
+                    f"🚨 Connection error (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
                 )
                 time.sleep(wait)
+                last_exc = e
+            except APITimeoutError as e:
+                wait = RETRY_BACKOFF_BASE * attempt
+                self.logger.warning(
+                    f"🚨 Timeout (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
+                )
+                time.sleep(wait)
+                last_exc = e
             except APIError as e:
-                self.logger.error(f"API error on attempt {attempt}: {e}")
+                self.logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
                 if attempt == MAX_RETRIES:
                     raise
                 time.sleep(RETRY_BACKOFF_BASE ** attempt)
-
-        raise RuntimeError(f"All {MAX_RETRIES} API retry attempts exhausted.")
+                last_exc = e
+        raise RuntimeError(f"🚨 All {MAX_RETRIES} API retry attempts exhausted.") from last_exc
     
     def _gpt_json_response(self, system: str, user: str, max_tokens: int = 1500) -> dict:
         """wrapper for GPT call with JSON response format."""
@@ -458,9 +543,28 @@ class BaseAIAgent(ABC):
             temperature=0.2,
             response_format={"type": "json_object"}
         )
-        raw = response.choices[0].message.content or "{}"
-        logger.debug(f"💬 raw gpt json response: {raw}")
-        return json.loads(raw)
+        raw = (response.choices[0].message.content or "{}").strip()
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        
+        try:
+            data = json.loads(clean)
+            logger.debug(f"💬 parsed json: {data}")
+            return data
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSONDecodeError: {e} | Attempting extraction. Raw: {raw}")
+            # Attempt to extract innermost or bounds of { }
+            start = clean.find("{")
+            end = clean.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(clean[start:end+1])
+                    logger.debug(f"💬 recovered json: {data}")
+                    return data
+                except json.JSONDecodeError:
+                    pass
+                    
+            logger.error("Failed to recover JSON, returning empty dict to prevent crash.")
+            return {}
 
     def _gpt_text_response(self, system: str, user: str, max_tokens: int = 512) -> str:
         """wrapper for GPT call with plain text response format."""
@@ -515,7 +619,47 @@ class MemoryStore:
         """Search semantic memory for entries containing the keyword."""
         return [mem for mem in self._semantic_memory if keyword.lower() in mem.fact.lower() or keyword.lower() in mem.category.lower()]
     
-    def log_memory_state(self, logger_instance) -> None:
+    def retrieve_ranked(self, goal: str, llm_call: Callable[[str, str], Dict],
+                        top_k: int = 6) -> Tuple[List[EpisodicMemory], List[SemanticMemory]]:
+        """
+        Score all stored memories against `goal` using a single LLM call,
+        then return the top_k most relevant from each layer.
+        Falls back gracefully to recency-ordered slice on any error.
+        """
+        all_ep  = list(self._episodic_memory)
+        all_sem = list(self._semantic_memory)
+
+        memories_text = "\n".join(
+            f"[EP-{m.memory_id}] event={m.event[:80]}" for m in all_ep
+        ) + "\n" + "\n".join(
+            f"[SE-{m.fact_id}] fact={m.fact[:80]}" for m in all_sem
+        )
+        if not memories_text.strip():
+            return [], []
+
+        try:
+            result = llm_call(
+                "You are a memory retrieval system. Score relevance of each memory to the goal. JSON only.",
+                MEMORY_RELEVANCE_PROMPT.format(goal=goal, memories_text=memories_text)
+            )
+            scored: List[Dict] = result.get("scored", [])
+            score_map = {s["id"]: float(s.get("relevance", 0.0)) for s in scored}
+
+            def _score_ep(m: EpisodicMemory) -> float:
+                return score_map.get(f"EP-{m.memory_id}", m.relevance_score)
+
+            def _score_sem(m: SemanticMemory) -> float:
+                return score_map.get(f"SE-{m.fact_id}", m.confidence)
+
+            top_ep = sorted(all_ep, key=_score_ep, reverse=True)[:top_k]
+            top_sem = sorted(all_sem,key=_score_sem, reverse=True)[:top_k]
+            return top_ep, top_sem
+
+        except Exception as e:
+            logger.warning(f"⚠️ Memory ranking failed ({e}), falling back to recency", extra={"tag": "memory"})
+            return all_ep[-top_k:], all_sem[-top_k:]
+
+    def log_memory_state(self, logger_instance=None) -> None:
         """Optimally log the current contents of the memory store."""
         logger_instance.info(f"💬 Memory State Snapshot: {len(self._episodic_memory)} Episodic | {len(self._semantic_memory)} Semantic")
         
@@ -529,6 +673,77 @@ class MemoryStore:
             for mem in self._semantic_memory:
                 logger_instance.debug(f"[{mem.confidence:.2f} | {mem.category}] {mem.fact}")
 
+# ==========================================
+# State Checkpointing
+# ==========================================
+class StateCheckpointer:
+    """
+    Persists individual stage results to a single static JSON file (lam_checkpoint.json).
+    Each stage key maps to its Pydantic model's .model_dump() / .dict().
+    Supports:
+      - save(key, model)     → write one stage
+      - load(key, ModelCls)  → restore typed instance or None
+      - exists(key)          → bool
+      - list_sessions()      → returns the static file if it exists
+    """
+
+    def __init__(self, directory: Path = CHECKPOINT_DIR) -> None:
+        self.dir = directory
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, request_id: str) -> Path:
+        return self.dir / "lam_checkpoint.json"
+
+    def _load_raw(self, request_id: str) -> Dict:
+        p = self._path(request_id)
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def _save_raw(self, request_id: str, data: Dict) -> None:
+        p = self._path(request_id)
+        p.write_text(json.dumps(data, default=str, indent=2), encoding="utf-8")
+        _ltag("checkpoint", logging.DEBUG, f"Checkpoint saved → {p.name}")
+
+    def exists(self, request_id: str, key: str) -> bool:
+        return key in self._load_raw(request_id)
+
+    def save(self, request_id: str, key: str, model: BaseModel) -> None:
+        data = self._load_raw(request_id)
+        data[key] = model.model_dump(mode="json")
+        data["__updated_at__"] = datetime.now(timezone.utc).isoformat()
+        self._save_raw(request_id, data)
+        _ltag("checkpoint", logging.INFO, f"Stage '{key}' checkpointed in static file")
+
+    def load(self, request_id: str, key: str, model_cls: type) -> Optional[Any]:
+        data = self._load_raw(request_id)
+        if key not in data:
+            return None
+        try:
+            instance = model_cls.model_validate(data[key]) 
+            _ltag("checkpoint", logging.INFO, f"✅ Yes I got this checkpoint; resuming from stage '{key}'")
+            return instance
+        except Exception as e:
+            _ltag("checkpoint", logging.WARNING, f"Could not restore '{key}': {e}")
+            return None
+
+    def save_raw_key(self, request_id: str, key: str, value: Any) -> None:
+        """Persist a plain-Python value (e.g. a string summary)."""
+        data = self._load_raw(request_id)
+        data[key] = value
+        self._save_raw(request_id, data)
+
+    def load_raw_key(self, request_id: str, key: str) -> Optional[Any]:
+        data = self._load_raw(request_id)
+        if key in data:
+            _ltag("checkpoint", logging.INFO, f"✅ Yes I got this checkpoint; resuming from stage '{key}'")
+            return data[key]
+        return None
+
+    def list_sessions(self) -> List[str]:
+        p = self.dir / "lam_checkpoint.json"
+        return ["lam_checkpoint"] if p.exists() else []
+    
 # ==========================================
 # Pipeline Stages
 # ==========================================
@@ -621,17 +836,16 @@ class TaskBreakdownStage:
     """
     
     def run(self, lam_input: LAMInput, intent_result: IntentRecognitionResult, agent: BaseAIAgent) -> TaskBreakdownResult:
-        logger.info("🛠️  [TASK BREAKDOWN] Decomposing intent into atomic tasks...")
+        logger.info("🛠️ [TASK BREAKDOWN] Decomposing intent into atomic tasks...")
         t0 = time.perf_counter()
 
         sub_goals_text = "\n".join(
-            f"  [{sg.goal_id}] {sg.description} (priority={sg.priority})"
+            f"[{sg.goal_id}] {sg.description} (priority={sg.priority})"
             for sg in intent_result.sub_goals
         )
         data = agent._gpt_json_response(
             system=(
-                "You are a task decomposition engine. Break down goals into "
-                "atomic, executable tasks with dependency links. JSON only."
+                "You are a task decomposition engine. Break down goals into atomic, executable tasks with dependency links. JSON only."
             ),
             user=TASK_BREAKDOWN_PROMPT_TEMPLATE.format(
                 primary_goal=intent_result.primary_goal,
@@ -666,7 +880,7 @@ class ActionPlanningStage:
     and what output to expect.
     """
     
-    def run(self, lam_input: LAMInput, task_breakdown_result: TaskBreakdownResult, intent_result: IntentRecognitionResult, agent: BaseAIAgent) -> ActionPlanResult:
+    def run(self, lam_input: LAMInput, task_breakdown_result: TaskBreakdownResult, intent_result: IntentRecognitionResult, agent: BaseAIAgent, memory_context: str = "") -> ActionPlanResult:
         logger.info(f"🧠 [ACTION PLANNING] Generating actions for {task_breakdown_result.task_count} tasks...")
         t0 = time.perf_counter()
         tasks_text = "\n".join(
@@ -682,7 +896,8 @@ class ActionPlanningStage:
                 primary_goal=intent_result.primary_goal,
                 tasks_text=tasks_text,
                 available_tools=", ".join(lam_input.available_tools),
-                constraints=", ".join(lam_input.constraints) if lam_input.constraints else "None"
+                constraints=", ".join(lam_input.constraints) if lam_input.constraints else "None",
+                memory_context=memory_context or "None"
             ),
             max_tokens=2000
         )
@@ -724,27 +939,27 @@ class MemorySystemStage:
         )
         memory_store.write_episodic(
             event=f"Intent recognized: {intent_result.primary_goal[:80]}",
-            context=f"Intent type: {intent_result.intent_type.value}, confidence: {intent_result.confidence}",
+            context=f"Intent type: {intent_result.intent_type.value}, confidence: {intent_result.confidence:.2f}",
             relevance_score=0.9
         )
         for action in action_plan_result.actions:
             memory_store.write_semantic(
-                fact=f"Planned action: {action.tool} ({action.parameters})",
+                fact=f"Planned action: {action.tool} ({json.dumps(action.parameters)[:60]})",
                 category='action_plan',
                 confidence=0.8
             )
         
-        # retrieve relevant memories
-        keyword = intent_result.primary_goal.split()[0] if intent_result.primary_goal else "action"
-        ep_hits = memory_store.search_episodic(keyword)
-        sem_hits = memory_store.search_semantic(keyword)
-        all_episodic = memory_store.read_episodic(n=8)
-        all_semantic = memory_store.read_semantic(n=10)
-        memory_hits = len(ep_hits) + len(sem_hits)
+        # retrieve ranked relevant memories
+        top_ep, top_sem = memory_store.retrieve_ranked(
+            goal=intent_result.primary_goal,
+            llm_call=lambda sys, usr: agent._gpt_json_response(system=sys, user=usr, max_tokens=600),
+            top_k=6
+        )
+        memory_hits = len(top_ep) + len(top_sem)
 
         # synthesis relevant context
-        episodic_text = "\n".join(f" - [{m.timestamp[:19]}] {m.event}" for m in all_episodic)
-        semantic_text = "\n".join(f" - [{m.category}] {m.fact}" for m in all_semantic)
+        episodic_text = "\n".join(f" - [{m.timestamp[:19]}] {m.event}" for m in top_ep)
+        semantic_text = "\n".join(f" - [{m.category}] {m.fact}" for m in top_sem)
 
         relevant_context = agent._gpt_text_response(
             system=(
@@ -760,42 +975,51 @@ class MemorySystemStage:
         )
         elapsed = time.perf_counter() - t0
         result = MemorySystemResult(
-            episodic_memories=all_episodic,
-            semantic_memories=all_semantic,
+            episodic_memories=top_ep,
+            semantic_memories=top_sem,
             relevant_context=relevant_context,
             memory_hits=memory_hits,
             processing_time=round(elapsed, 4)
         )
         logger.info(
-            f"✅ [MEMORY SYSTEM] episodic={len(all_episodic)} | "
-            f"semantic={len(all_semantic)} | hits={memory_hits} | time={elapsed:.4f}s"
+            f"✅ [MEMORY SYSTEM] episodic={len(top_ep)} | semantic={len(top_sem)} | hits={memory_hits} | time={elapsed:.4f}s"
         )
-        logger.debug(f"💬 [memory system stage] | relevant_context: {relevant_context}" )
+        logger.debug(
+            f"💬 [memory system stage] | relevant_context: {relevant_context} | "
+            f"episodic_memories: {top_ep} | semantic_memories: {top_sem}" 
+        )
         return result
     
 class NeuroSymbolicIntegrationStage:
     """
     Stage 7: NEURO-SYMBOLIC INTEGRATION
-    Validates the action plan against a symbolic rule engine.
+    Validates the action plan through a two-pass hybrid engine:
 
-    Neuro component  : GPT-4o performs natural language constraint reasoning.
-    Symbolic component: Hard-coded deterministic rule predicates that cannot be overridden by neural outputs (safety invariants).
+    Pass 1 — SYMBOLIC (deterministic):
+      Hard-coded predicate rules evaluated locally. Non-negotiable.
 
-    This dual validation ensures plans are both contextually sensible (neural) and formally safe (symbolic).
+    Pass 2 — NEURAL (LLM):
+      GPT receives the list of *triggered* symbolic violations as hard
+      constraints and reasons about whether the plan is overall safe,
+      what additional concerns exist, and what remediations are required.
+      This is the hybrid integration — both passes inform each other.
     """
 
     # symbolic rules (deterministic, non-negotiable)
-    SYMBOLIC_RULES: list[dict] = [
+    SYMBOLIC_RULES: List[Dict] = [
         {
             "id"  : "SYM-001",
             "type": ConstraintType.SAFETY,
             "rule": "No action may delete data without an explicit backup step first.",
-            "predicate": lambda actions: not any(
-                "delete" in a.tool.lower() or "delete" in str(a.parameters).lower()
-                for a in actions
-            ) or any(
-                "backup" in a.tool.lower() or "backup" in str(a.parameters).lower()
-                for a in actions
+            "predicate": lambda actions: (
+                not any(
+                    "delete" in a.tool.lower() or "delete" in str(a.parameters).lower()
+                    for a in actions
+                )
+                or any(
+                    "backup" in a.tool.lower() or "backup" in str(a.parameters).lower()
+                    for a in actions
+                )
             ),
         },
         {
@@ -804,76 +1028,87 @@ class NeuroSymbolicIntegrationStage:
             "rule": "No action may target user PII without explicit consent parameter.",
             "predicate": lambda actions: not any(
                 any(kw in str(a.parameters).lower()
-                    for kw in ["email", "phone", "ssn", "password", "pii"])
+                    for kw in ["ssn", "password", "credit_card"])
+                and "consent" not in str(a.parameters).lower()
                 for a in actions
             ),
         },
         {
             "id"  : "SYM-003",
             "type": ConstraintType.FEASIBILITY,
-            "rule": "Total action steps must not exceed MAX_STEPS.",
+            "rule": "Total action steps must not exceed MAX_STEPS (50).",
             "predicate": lambda actions: len(actions) <= 50,
         },
         {
             "id"  : "SYM-004",
             "type": ConstraintType.DEPENDENCY,
-            "rule": "Every action must reference a valid task_id from the task graph.",
-            "predicate": lambda actions: all(a.task_id for a in actions),
+            "rule": "Every action must reference a valid task_id.",
+            "predicate": lambda actions: all(bool(a.task_id) for a in actions),
         },
     ]
 
     def run(self, lam_input: LAMInput, action_plan_result: ActionPlanResult, intent_result: IntentRecognitionResult, agent: BaseAIAgent) -> NeuroSymbolicResult:
         logger.info(
-            f"🛡️  [NEURO-SYMBOLIC] Validating {action_plan_result.action_count} actions against symbolic rules..."
+            f"🛡️ [NEURO-SYMBOLIC] Validating {action_plan_result.action_count} actions against symbolic rules..."
         )
         t0 = time.perf_counter()
-        constraints_checked: list[SymbolicConstraint] = []
-        blocked_actions: list[str] = []
+        constraints_checked: List[SymbolicConstraint] = []
+        blocked_actions: List[str] = []
         violations_found: int = 0
+        violation_texts: List[str] = []
 
-        # symbolic rule checks
+        # pass 1: symbolic (deterministic)
         for rule in self.SYMBOLIC_RULES:
             try:
                 satisfied = rule["predicate"](action_plan_result.actions)
             except Exception as e:
-                logger.error(f"Error evaluating symbolic rule {rule['id']}: {e}")
+                agent.logger.error(
+                    f"Error evaluating rule {rule['id']}: {e}", extra={"tag": "fail"}
+                )
                 satisfied = False
-            
-            violation_detail = None
+
+            violation_detail: Optional[str] = None
             if not satisfied:
                 violations_found += 1
-                violation_detail = f'Rule "{rule['rule']}" was violated.'
-                logger.warning(f"🛡️ [NEURO-SYMBOLIC] VIOLATION: {rule['id']} — {violation_detail}")
-                # mark all actions as blocked if hard safety rule fails
+                violation_detail = f'Rule "{rule["rule"]}" was violated.'
+                violation_texts.append(f"[{rule['id']} | {rule['type']}] {violation_detail}")
+                agent.logger.warning(
+                    f"VIOLATION {rule['id']}: {violation_detail}", extra={"tag": "shield"}
+                )
+                # Hard safety / ethical violations block ALL actions immediately
                 if rule["type"] in (ConstraintType.SAFETY, ConstraintType.ETHICAL):
                     blocked_actions = [a.action_id for a in action_plan_result.actions]
-            
+
             constraints_checked.append(SymbolicConstraint(
                 constraint_id=rule["id"],
                 constraint_type=rule["type"],
                 rule=rule["rule"],
                 applies_to=[a.action_id for a in action_plan_result.actions],
                 is_satisfied=satisfied,
-                violation_detail=violation_detail
+                violation_detail=violation_detail,
             ))
         
-        # neural constraint reasoning
+        # pass 2: neural - constrained by symbolic violations
         action_summary = "\n".join(
-            f" - [{a.action_id}] Step {a.step}: {a.tool} with {a.parameters} => {a.expected_output}"
+            f" [{a.action_id}] step {a.step}: {a.tool}({json.dumps(a.parameters)[:60]}) → {a.expected_output}"
             for a in action_plan_result.actions
         )
-        user_constraints = "\n".join(f" - {c}" for c in lam_input.constraints) if lam_input.constraints else "None"
+        user_constraints = "\n".join(f" - {c}" for c in lam_input.constraints) or "None"
+        violations_text  = "\n".join(violation_texts) if violation_texts else "None"
+
+        # The LLM receives the fired symbolic violations as hard facts - it cannot override them, only reason about remediation.
         symbolic_reasoning = agent._gpt_text_response(
             system=(
-                "You are a symbolic reasoning validator for an autonomous agent. "
-                "Assess whether the action plan is safe, feasible, and ethical. "
-                "Be specific about any concerns. One paragraph."
+                "You are a neuro-symbolic reasoning validator. "
+                "The symbolic rule engine has already flagged violations below — treat them as FACTS. "
+                "Your job is to assess overall plan safety, identify any ADDITIONAL concerns the symbolic rules missed, and propose concrete remediations. "
+                "One paragraph."
             ),
-            user=(
-                f"Goal: {intent_result.primary_goal}\n\n"
-                f"User Constraints:\n{user_constraints}\n\n"
-                f"Action Plan:\n{action_summary}\n\n"
-                "Is this plan safe, feasible, and ethical? State your reasoning."
+            user=NEURO_SYMBOLIC_REASONING_TEMPLATE.format(
+                violations_text=violations_text,
+                action_summary=action_summary,
+                primary_goal=intent_result.primary_goal,
+                user_constraints=user_constraints,
             ),
             max_tokens=400,
         )
@@ -909,92 +1144,159 @@ class FeedbackIntegrationStage:
     on each step, and triggers re-planning if failures are detected.
 
     This implements the LAM's core adaptive loop:
-    Plan → Simulate → Evaluate → (Re-plan if needed) → Finalise
+    This implements the true adaptive loop: Plan → Sim → Eval → Re-plan (if needed) → Re-sim.
     """
+    def run(self, lam_input: LAMInput,
+            neuro_symbolic: NeuroSymbolicResult,
+            action_plan: ActionPlanResult,
+            intent: IntentRecognitionResult,
+            memory_store: MemoryStore,
+            agent: BaseAIAgent
+        ) -> FeedbackIntegrationResult:
 
-    def run(self, neuro_symbolic_result: NeuroSymbolicResult, action_plan_result: ActionPlanResult, intent_result: IntentRecognitionResult, memory_store: MemoryStore, agent: BaseAIAgent) -> FeedbackIntegrationResult:
-        logger.info(f"⚙️ [FEEDBACK] Simulating execution of {len(neuro_symbolic_result.approved_actions)} approved actions...")
+        logger.info(
+            f"Simulating {len(neuro_symbolic.approved_actions)} approved actions…",
+            extra={"tag": "feedback"}
+        )
         t0 = time.perf_counter()
-        approved_ids = set(neuro_symbolic_result.approved_actions)
-        active_actions = [a for a in action_plan_result.actions if a.action_id in approved_ids]
-        feedback_log: list[FeedbackEntry] = []
+
+        approved_ids = set(neuro_symbolic.approved_actions)
+        active_actions = [a for a in action_plan.actions if a.action_id in approved_ids]
+        feedback_log: List[FeedbackEntry] = []
         replanning_count = 0
-        iteration = 1
 
-        for action in active_actions:
-            logger.debug(f"⚙️ [FEEDBACK] Simulating action {action.action_id} | step={action.step} | tool={action.tool}...")
-
+        def _simulate(action: Action, iteration: int) -> FeedbackEntry:
             data = agent._gpt_json_response(
-                system=(
-                    "You are an action execution simulator. Simulate running the given action and determine if it would succeed. JSON only."
-                ),
+                system="You are an action execution simulator. JSON only.",
                 user=FEEDBACK_PROMPT_TEMPLATE.format(
-                    primary_goal=intent_result.primary_goal,
+                    primary_goal=intent.primary_goal,
                     tool=action.tool,
                     parameters=json.dumps(action.parameters),
                     expected_output=action.expected_output,
                     rationale=action.rationale,
                 ),
-                max_tokens=400
+                max_tokens=1500,
             )
-            success = bool(data.get("success", True))
-            correction = data.get("correction", None)
-
-            # normalize result to string
             raw_sim = data.get("simulated_result", "")
-            if not isinstance(raw_sim, str):
-                try: 
-                    simulated_result = json.dumps(raw_sim, ensure_ascii=False)
-                except Exception:
-                    simulated_result = str(raw_sim)
-            else:
-                simulated_result = raw_sim
-
-            entry = FeedbackEntry(
+            sim_str = raw_sim if isinstance(raw_sim, str) else json.dumps(raw_sim)
+            return FeedbackEntry(
                 iteration=iteration,
                 action_id=action.action_id,
-                simulated_result=simulated_result,
-                success=success,
-                correction=correction
+                simulated_result=sim_str,
+                success=bool(data.get("success", True)),
+                correction=data.get("correction"),
             )
+
+        iteration = 1
+        for action in active_actions:
+            entry = _simulate(action, iteration)
             feedback_log.append(entry)
             iteration += 1
-            if success:
+
+            if entry.success:
                 action.status = ActionStatus.COMPLETED
                 memory_store.write_episodic(
                     event=f"Action {action.action_id} completed: {action.tool}",
-                    context=f"Simulated result: {simulated_result[:100]}",
-                    relevance_score=0.7
+                    context=f"Result: {entry.simulated_result[:100]}",
+                    relevance_score=0.7,
                 )
             else:
                 action.status = ActionStatus.FAILED
                 replanning_count += 1
-                logger.warning(f"⚠️ [FEEDBACK] Action {action.action_id} failed simulation. Correction: {correction}")
+                logger.warning(
+                    f"⚠️ Action {action.action_id} failed. Correction: {entry.correction}",
+                    extra={"tag": "adapt"}
+                )
+
                 if replanning_count >= MAX_FEEDBACK_ITERATIONS:
-                    logger.error(f"❌ [FEEDBACK] Max re-planning iterations ({MAX_FEEDBACK_ITERATIONS}) reached. Halting.")
+                    logger.error(
+                        f"❌ Max re-plan iterations ({MAX_FEEDBACK_ITERATIONS}) reached. Halting.",
+                        extra={"tag": "fail"}
+                    )
                     break
-        
-        final_plan_valid = replanning_count < MAX_FEEDBACK_ITERATIONS and all(e.success for e in feedback_log)
+
+                # re-plan for this failed action 
+                logger.info(
+                    f"⚠️ Re-planning failed action {action.action_id}…",
+                    extra={"tag": "adapt"}
+                )
+                failed_text = (
+                    f"[{action.action_id}] step {action.step}: "
+                    f"{action.tool}({json.dumps(action.parameters)}) → "
+                    f"FAILED. Correction hint: {entry.correction or 'none'}"
+                )
+                corrections = entry.correction or "Try alternative approach."
+
+                try:
+                    replan_data = agent._gpt_json_response(
+                        system=(
+                            "You are an action re-planner. Generate replacement actions ONLY for the failed action. JSON only."
+                        ),
+                        user=ACTION_REPLAN_PROMPT_TEMPLATE.format(
+                            primary_goal=intent.primary_goal,
+                            failed_actions=failed_text,
+                            memory_context=memory_store.retrieve_ranked(
+                                intent.primary_goal,
+                                lambda s, u: agent._gpt_json_response(s, u, 400),
+                                top_k=3,
+                            )[0], # just episodic list; str conversion below
+                            constraints=", ".join(lam_input.constraints) or "None",
+                            corrections=corrections,
+                        ),
+                        max_tokens=800,
+                    )
+                    replacement_actions = [
+                        Action(**a) for a in replan_data.get("actions", [])
+                    ]
+                    if replacement_actions:
+                        # Replace failed action with first replacement; simulate
+                        replacement = replacement_actions[0]
+                        replacement.status = ActionStatus.PENDING
+                        # Update in action_plan for final output
+                        for i, a in enumerate(action_plan.actions):
+                            if a.action_id == action.action_id:
+                                action_plan.actions[i] = replacement
+                                break
+                        re_entry = _simulate(replacement, iteration)
+                        feedback_log.append(re_entry)
+                        iteration += 1
+                        if re_entry.success:
+                            replacement.status = ActionStatus.COMPLETED
+                            logger.info(
+                                f"✅ Re-planned action {replacement.action_id} succeeded",
+                                extra={"tag": "success"}
+                            )
+                        else:
+                            replacement.status = ActionStatus.FAILED
+                            logger.warning(f"⚠️ Re-planned action {replacement.action_id} also failed. Correction: {re_entry.correction}", extra={"tag": "warn"})
+                except Exception as e:
+                    logger.error(f"❌ Error during re-planning: {e}", extra={"tag": "fail"})
+
+        final_plan_valid = (
+            replanning_count < MAX_FEEDBACK_ITERATIONS
+            and all(e.success for e in feedback_log)
+        )
         successes = sum(1 for e in feedback_log if e.success)
+
         execution_summary = agent._gpt_text_response(
-            system="You are an execution reporter. Summarise what was accomplished.",
+            system="You are an execution reporter. Summarise what was accomplished. 2 sentences.",
             user=(
-                f"Goal: {intent_result.primary_goal}\n"
+                f"Goal: {intent.primary_goal}\n"
                 f"Actions Simulated: {len(feedback_log)}\n"
                 f"Successes: {successes} | Failures: {len(feedback_log) - successes}\n"
-                f"Re-planning cycles: {replanning_count}\n\n"
-                "Write a 2-sentence execution summary."
+                f"Re-planning cycles: {replanning_count}\n"
             ),
             max_tokens=200,
         )
         elapsed = time.perf_counter() - t0
+
         result = FeedbackIntegrationResult(
             iterations=iteration - 1,
             feedback_log=feedback_log,
             replanning_count=replanning_count,
             final_plan_valid=final_plan_valid,
             execution_summary=execution_summary,
-            processing_time=round(elapsed, 4)
+            processing_time=round(elapsed, 4),
         )
         logger.info(
             f"✅ [FEEDBACK] iterations={len(feedback_log)} | "
@@ -1021,89 +1323,110 @@ class LAMAgent(BaseAIAgent):
         self._neuro_symbolic = NeuroSymbolicIntegrationStage()
         self._feedback = FeedbackIntegrationStage()
         self._memory_store = MemoryStore()
+        self._checkpointer = StateCheckpointer()
+        self._registered_tools: List[str] = []  
+
+    def register_tool(self, tool_name: str, description: str = "") -> None:
+        """Register a custom tool name so it appears in planning prompts."""
+        self._registered_tools.append(tool_name)
+        self.logger.info(
+            f"Tool '{tool_name}' registered ({description})",
+            extra={"tag": "tool"}
+        )
 
     def process(self, lam_input: LAMInput, checkpoint_file: str = None) -> LAMOutput:
         """
-        Execute the full LAM pipeline with optional checkpointing.
+        Execute the full 9-stage LAM pipeline with typed checkpointing.
+        Resume is automatic — if a checkpoint exists for request_id, completed stages are skipped.
         """
         pipeline_start = time.perf_counter()
-        logger.info(f"🚀 [LAMAgent] Starting LAM pipeline for request_id={lam_input.request_id}")
-        
-        state = {}
-        if checkpoint_file and os.path.exists(checkpoint_file):
-            with open(checkpoint_file, 'r') as f:
-                state = json.load(f)
-            logger.info("♻️ [LAMAgent] Loaded existing checkpoint data.")
+        rid = lam_input.request_id
+        cp  = self._checkpointer
 
-        def save_state():
-            if checkpoint_file:
-                with open(checkpoint_file, 'w') as f:
-                    json.dump(state, f, indent=2)
+        self.logger.info(
+            f"Pipeline START | request_id={rid[:8]} | model={CHAT_MODEL}",
+            extra={"tag": "boot"}
+        )
+
+        # Merge registered tools into available_tools
+        if self._registered_tools:
+            lam_input.available_tools = list(
+                dict.fromkeys(lam_input.available_tools + self._registered_tools)
+            )
 
         try:
-            # stage 2 - perception
-            if "perception" in state:
-                perception = PerceptionResult.model_validate(state["perception"])
-            else:
+            # ── Stage 2: Perception ───────────────────────────────────────────
+            perception = cp.load(rid, "perception", PerceptionResult)
+            if perception is None:
                 perception = self._perception.run(lam_input, self)
-                state["perception"] = perception.model_dump(mode="json")
-                save_state()
+                cp.save(rid, "perception", perception)
 
-            # stage 3 - intent recognition
-            if "intent" in state:
-                intent = IntentRecognitionResult.model_validate(state["intent"])
-            else:
+            # ── Stage 3: Intent Recognition ───────────────────────────────────
+            intent = cp.load(rid, "intent", IntentRecognitionResult)
+            if intent is None:
                 intent = self._intent.run(lam_input, perception, self)
-                state["intent"] = intent.model_dump(mode="json")
-                save_state()
+                cp.save(rid, "intent", intent)
 
-            # stage 4 - task breakdown
-            if "task_breakdown" in state:
-                task_breakdown = TaskBreakdownResult.model_validate(state["task_breakdown"])
-            else:
+            # ── Stage 4: Task Breakdown ───────────────────────────────────────
+            task_breakdown = cp.load(rid, "task_breakdown", TaskBreakdownResult)
+            if task_breakdown is None:
                 task_breakdown = self._task_breakdown.run(lam_input, intent, self)
-                state["task_breakdown"] = task_breakdown.model_dump(mode="json")
-                save_state()
+                cp.save(rid, "task_breakdown", task_breakdown)
 
-            # stage 5 - action planning
-            if "action_plan" in state:
-                action_plan = ActionPlanResult.model_validate(state["action_plan"])
-            else:
-                action_plan = self._action_plan.run(lam_input, task_breakdown, intent, self)
-                state["action_plan"] = action_plan.model_dump(mode="json")
-                save_state()
+            # ── Stage 5 (pre-memory): Initial Action Plan ────────────────────
+            #    We plan first without memory context, then enrich memory,
+            #    then re-plan if memory adds significant context.
+            action_plan = cp.load(rid, "action_plan", ActionPlanResult)
+            if action_plan is None:
+                action_plan = self._action_plan.run(
+                    lam_input, task_breakdown, intent, self, memory_context=""
+                )
+                cp.save(rid, "action_plan", action_plan)
 
-            # stage 6 <=> 7: memory system <=> neuro-symbolic integration
-            if "memory" in state and "neuro_symbolic" in state:
-                memory = MemorySystemResult.model_validate(state["memory"])
-                neuro_symbolic = NeuroSymbolicResult.model_validate(state["neuro_symbolic"])
-            else:
-                self.logger.info("🔄 [LAMAgent] Entering memory-symbolic feedback loop...")
-                memory = self._memory_stage.run(lam_input, intent, action_plan, self._memory_store, self)
-                neuro_symbolic = self._neuro_symbolic.run(lam_input, action_plan, intent, self)
-                state["memory"] = memory.model_dump(mode="json")
-                state["neuro_symbolic"] = neuro_symbolic.model_dump(mode="json")
-                save_state()
+            # ── Stage 6: Memory System ←→ Stage 5 feedback ───────────────────
+            memory = cp.load(rid, "memory", MemorySystemResult)
+            if memory is None:
+                memory = self._memory_stage.run(
+                    lam_input, intent, action_plan, self._memory_store, self
+                )
+                cp.save(rid, "memory", memory)
+                # Re-plan enriched with memory context (bidirectional loop)
+                if memory.memory_hits > 0 and memory.relevant_context.strip():
+                    self.logger.info(
+                        "Memory context available — re-enriching action plan…",
+                        extra={"tag": "adapt"}
+                    )
+                    action_plan = self._action_plan.run(
+                        lam_input, task_breakdown, intent, self,
+                        memory_context=memory.relevant_context
+                    )
+                    cp.save(rid, "action_plan", action_plan)
 
-            # stage 8: feedback integration
-            if "feedback" in state:
-                feedback = FeedbackIntegrationResult.model_validate(state["feedback"])
-            else:
-                feedback = self._feedback.run(neuro_symbolic, action_plan, intent, self._memory_store, self)
-                state["feedback"] = feedback.model_dump(mode="json")
-                save_state()
+            # ── Stage 7: Neuro-Symbolic Integration ───────────────────────────
+            neuro_symbolic = cp.load(rid, "neuro_symbolic", NeuroSymbolicResult)
+            if neuro_symbolic is None:
+                neuro_symbolic = self._neuro_symbolic.run(
+                    lam_input, action_plan, intent, self
+                )
+                cp.save(rid, "neuro_symbolic", neuro_symbolic)
 
-            # stage 9: output
-            executable_actions = [a for a in action_plan.actions if a.status in (ActionStatus.EXECUTABLE, ActionStatus.COMPLETED)]
-            
-            if "final_summary" in state:
-                final_summary = state["final_summary"]
-            else:
+            # ── Stage 8: Feedback Integration ─────────────────────────────────
+            feedback = cp.load(rid, "feedback", FeedbackIntegrationResult)
+            if feedback is None:
+                feedback = self._feedback.run(
+                    lam_input, neuro_symbolic, action_plan,
+                    intent, self._memory_store, self
+                )
+                cp.save(rid, "feedback", feedback)
+
+            # ── Stage 9: Output ───────────────────────────────────────────────
+            final_summary = cp.load_raw_key(rid, "final_summary")
+            if final_summary is None:
                 final_summary = self._gpt_text_response(
                     system="You are an action plan reporter. Be concise and precise.",
                     user=(
                         f"Goal: {intent.primary_goal}\n"
-                        f"Approved Actions: {len(neuro_symbolic.approved_actions)}\n"
+                        f"Approved: {len(neuro_symbolic.approved_actions)}\n"
                         f"Violations: {neuro_symbolic.violations_found}\n"
                         f"Execution Valid: {feedback.final_plan_valid}\n"
                         f"Execution Summary: {feedback.execution_summary}\n\n"
@@ -1111,12 +1434,23 @@ class LAMAgent(BaseAIAgent):
                     ),
                     max_tokens=200,
                 )
-                state["final_summary"] = final_summary
-                save_state()
+                cp.save_raw_key(rid, "final_summary", final_summary)
+
+            executable_actions = [
+                a for a in action_plan.actions
+                if a.status in (ActionStatus.EXECUTABLE, ActionStatus.COMPLETED)
+            ]
+
+            # FIX-09: status reflects true pipeline outcome
+            if not feedback.final_plan_valid:
+                pipeline_status = PipelineStatus.PARTIAL
+            else:
+                pipeline_status = PipelineStatus.COMPLETED
 
             total_time = time.perf_counter() - pipeline_start
             output = LAMOutput(
-                request_id=lam_input.request_id,
+                request_id=rid,
+                status=pipeline_status,
                 perception=perception,
                 intent=intent,
                 task_breakdown=task_breakdown,
@@ -1145,28 +1479,42 @@ class LAMAgent(BaseAIAgent):
         except Exception as e:
             elapsed = time.perf_counter() - pipeline_start
             self.logger.error(
-                f"💥 [LAM AGENT] Pipeline FAILED after {elapsed:.4f}s | "
+                f"❌ [LAM AGENT] Pipeline FAILED after {elapsed:.4f}s | "
                 f"error={type(e).__name__}: {e}"
             )
             raise
 
     def display_output(self, output: LAMOutput) -> None:
-        div = "=" * 100
-        print(f"\n{div}")
-        print("  🟡 LAM AGENT — Large Action Model Pipeline Result")
+        DIV  = "═" * 100
 
-        print(f"{div}")
-        print(f"  Request ID       : {output.request_id}")
-        print(f"  Status           : {output.status.value}")
-        print(f"  Total Time       : {output.total_pipeline_time}s")
+        print(f"\n{DIV}")
+        print("🟡 LAM AGENT — Large Action Model Pipeline Result")
+        print(DIV)
+
+        print(f"Request ID: {output.request_id}")
+        print(f"Total Time: {output.total_pipeline_time:.2f}s")
+        print(f"Model: {output.metadata.get('model', CHAT_MODEL)}")
+
+        print(DIV)
+        print("📝 FINAL SUMMARY")
+        print(DIV)
+        for line in textwrap.wrap(output.final_summary, width=120):
+            print(f"{line}")
+        print(f"\n{DIV}")
         
-        print(f"\n  📝 FINAL SUMMARY:\n  {output.final_summary}")
-        print(f"\n{div}\n") 
+        print("🛠️ SIMULATED ACTION RESULTS")
+        print(DIV)
+        for entry in output.feedback.feedback_log:
+            print(f"\n▶ Action [{entry.action_id}] Success: {entry.success}")
+            print("  Result:")
+            print(textwrap.indent(entry.simulated_result, "    "))
+            
+        print(f"\n{DIV}\n")
 
 # ==========================================
 # Instatiation
 # ==========================================
-def create_lam_agent(api_key, endpoint) -> LAMAgent:
+def create_lam_agent(api_key: str = TOKEN, endpoint: str = ENDPOINT) -> LAMAgent:
     """Factory function to create an instance of LAMAgent with the provided API credentials."""
     client = OpenAI(
         base_url=endpoint,
@@ -1183,28 +1531,28 @@ if __name__ == "__main__":
     # create agent instance
     agent = create_lam_agent(TOKEN, ENDPOINT)
 
-    # prompt
-    instruction = "Research the top open-source LLM frameworks available in 2026, then generate a structured markdown report."
-    constraints = [
-                    "Do not access any paywalled sources.",
-                    "Report must be under 500 words."
-                ]
-    
-    # build input
+    # Optional: register a custom tool 
+    agent.register_tool("markdown_writer", "Writes structured markdown reports to disk")
+
+    # Build input
     lam_input = LAMInput(
-        instruction=instruction,
+        instruction=(
+            "Research the top open-source LLM frameworks available in 2026, then generate a structured markdown report."
+        ),
         environment=EnvironmentType.WEB,
-        constraints=constraints, 
+        constraints=[
+            "Do not access any paywalled sources.",
+            "Report must be under 500 words.",
+        ],
         available_tools=[
-            "web_search", "web_fetch", "markdown_writer",
-            "file_write", "memory_read", "memory_write",
+            "web_search", "web_fetch", "markdown_writer", "file_write", "memory_read", "memory_write",
         ],
         max_steps=15,
-        metadata={"source": "lam_agent_demo", "version": "1.0.0"},
+        metadata={"source": "lam_agent_demo", "version": "1.0"},
     )
 
-    # execute pipeline
-    result = agent.process(lam_input, checkpoint_file="checkpoints/lam_checkpoint.json")
+    # Run pipeline 
+    result = agent.process(lam_input)
 
-    # display results
+    # Display results 
     agent.display_output(result)
