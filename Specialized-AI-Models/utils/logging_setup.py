@@ -40,7 +40,7 @@ def get_logger(name: str, log_file: str = None, level=logging.DEBUG):
    if log_file:
        log_dir = Path("logs").resolve()
        log_dir.mkdir(parents=True, exist_ok=True)
-       file_handler = logging.FileHandler(log_dir / log_file, mode='w')  # 'a' for append
+       file_handler = logging.FileHandler(log_dir / log_file, mode='a')  # 'a' for append and 'w' for overwrite
        file_handler.setLevel(level)
        file_handler.setFormatter(formatter)
        logger.addHandler(file_handler)

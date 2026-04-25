@@ -1,22 +1,22 @@
-<h1 align="center">🧠 Specialized AI Agents</h1>
+<h1 align="center">🧠 Specialized AI Models🧠</h1>
 A modular, production-grade repository showcasing distinct AI agent architectures. Built with a focus on type safety, observability, and deterministic stage execution.
 
 ## Table of Contents
 
-- Technical Stack
-- Project Overview
-- Quickstart
-- Agent: LLM (Large Language Model)
-- Agent: LCM (Large Concept Model)
-- Agent: LAM (Large Action Model)
-- Logging & Observability
-- Contributing
-- Security & Secrets
+- [Technical Stack](#️-technical-stack)
+- [Project Overview](#-project-overview)
+- [Quickstart](#-quickstart)
+- [Agent: LLM (Large Language Model)](#-agent-1-llm-large-language-model)
+- [Agent: LCM (Large Concept Model)](#-agent-2-lcm-large-concept-model)
+- [Agent: LAM (Large Action Model)](#-agent-3-lam-large-action-model)
+- [Logging & Observability](#-logging--observability)
+- [Contributing](#-contributing)
+- [Security & Secrets](#-security--secrets)
 
 ## ⚙️ Technical Stack
 
 - **Core**: Python 3.11+, Pydantic v2, ABC (Abstract Base Classes)
-- **AI/ML**: OpenAI API (gpt-4o, text-embedding-3-small), NLTK, tiktoken
+- **AI/ML**: OpenAI API (gpt-4.1, text-embedding-3-small), NLTK, tiktoken
 - **Infra**: `uv` package manager, `.env` for secrets management
 
 ## 🏗 Project Overview
@@ -26,7 +26,7 @@ This architecture treats AI pipelines as strict, sequential data contracts. Each
 Design guarantees:
 
 - **Type Safety**: Pydantic models validate all inputs and outputs between pipeline stages.
-- **Resiliency**: Exponential backoff and retry logic for API calls.
+- **Resiliency**: Exponential backoff (base 2, max 32s) and adaptive retry logic for transient API failures. Configured per agent with configurable max retries (default: 3). Circuit-breaker pattern prevents cascading failures across pipeline stages.
 - **Modularity**: Abstract base classes (`BaseAIAgent`) enforce a uniform interface.
 - **Observability**: Structured, per-stage logging with execution timings.
 
@@ -61,20 +61,17 @@ A strict-pipeline conversational agent.
 
 **Pipeline Flow:**
 
-```mermaid
-graph LR
-    A[Input] --> B[Tokenization]
-    B --> C[Embedding]
-    C --> D[Transformer]
-    D --> E[Output]
-```
+<figure>
+  <img src="assets/image/llm.png" alt="LLM pipeline flow" style="max-width:100%;width:800px;">
+  <figcaption align="center">LLM pipeline flow</figcaption>
+</figure>
 
 | Stage            | Implementation                                    | Data Contract       |
 | :--------------- | :------------------------------------------------ | :------------------ |
 | **Input**        | Raw text ingestion & validation                   | `LLMInput`          |
 | **Tokenization** | Real token counting & truncation via `tiktoken`   | `TokenizedResult`   |
 | **Embedding**    | Semantic vectorization (`text-embedding-3-small`) | `EmbeddingResult`   |
-| **Transformer**  | Attention-based generation (`gpt-4o` family)      | `TransformerResult` |
+| **Transformer**  | Attention-based generation (`gpt-4.1` family)     | `TransformerResult` |
 | **Output**       | Aggregated pipeline metadata and final text       | `LLMOutput`         |
 
 ## 🟢 Agent 2: LCM (Large Concept Model)
@@ -83,17 +80,10 @@ An advanced agent operating in latent concept space rather than surface token sp
 
 **Pipeline Flow:**
 
-```mermaid
-graph LR
-    A[Input] --> B[Sentence Segmentation]
-    B --> C[SONAR Embedding]
-    C --> D[Diffusion]
-    D --> E[Advanced Patterning]
-    D --> F[Hidden Process]
-    E --> G[Quantization]
-    F --> G
-    G --> H[Output]
-```
+<figure>
+  <img src="assets/image/lcm.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;">
+  <figcaption align="center">LCM pipeline flow</figcaption>
+</figure>
 
 | Stage               | Implementation                                     | Data Contract              |
 | :------------------ | :------------------------------------------------- | :------------------------- |
@@ -111,18 +101,10 @@ An "executive function" agent that operates in _action space_ rather than token 
 
 **Pipeline Flow:**
 
-```mermaid
-graph LR
-    A[Input] --> B[Perception]
-    B --> C[Intent Recognition]
-    C --> D[Task Breakdown]
-    D --> E[Action Planning]
-    E <--> F[Memory System]
-    E <--> G[Neuro-Symbolic]
-    F <--> G
-    G --> H[Feedback Integration]
-    H --> I[Output]
-```
+<figure>
+  <img src="assets/image/lam.png" alt="LAM pipeline flow" style="max-width:100%;width:800px;">
+  <figcaption align="center">LAM pipeline flow</figcaption>
+</figure>
 
 | Stage                  | Implementation                                         | Data Contract               |
 | :--------------------- | :----------------------------------------------------- | :-------------------------- |
@@ -139,6 +121,7 @@ graph LR
 ## 📊 Logging & Observability
 
 - Centralized logger configured via `logging_setup.py`.
+- Centralized state checkpoint configured via `state_checkpointer.py`.
 - Execution timings are tracked at the nanosecond level per stage using `time.perf_counter()`.
 - Output is written locally to `logs/<agent_name>.log`.
 
@@ -153,4 +136,4 @@ graph LR
 - Do not commit `.env` files.
 - Logs are sanitized locally. Ensure `system_prompt` and Pydantic object dumps do not expose user PII.
 
-<p align="center">Made with ❤️ by Jiten.</p>
+<h3 align="center">Made with ❤️ by Jiten.</h3>

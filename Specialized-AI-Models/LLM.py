@@ -18,25 +18,37 @@ import os
 from openai import OpenAI, APIError, RateLimitError, APITimeoutError
 import time
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 import uuid
 from datetime import datetime, timezone
 import tiktoken
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from logging_setup import get_logger
+from utils.logging_setup import get_logger
 logger = get_logger(__name__, log_file="llm.log")
+
 
 # ==========================================
 # Variable Configuration
 # ==========================================
+from utils.state_checkpointer import StateCheckpointer
+CHECKPOINT_DIR = Path("./checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+checkpointer = StateCheckpointer(
+    directory=CHECKPOINT_DIR, 
+    filename="llm_checkpoint.json",
+    logger=logger
+)
+
 TOKEN = os.environ['GITHUB_TOKEN']
 ENDPOINT = os.environ['GITHUB_ENDPOINT']
 CHAT_MODEL = os.environ['GITHUB_MODEL_NAME']
 EMBEDDING_MODEL = os.environ['GITHUB_EMBED_NAME']
+
 ENCODING = "cl100k_base" # encoding used by gpt-4o / gpt-4 family
 MAX_RETRIES = 3
 MAX_TOKEN_LIMIT = 8192
@@ -337,14 +349,23 @@ class LLMAgent(BaseAIAgent):
         )
         try:
             # Stage 2: Tokenization
-            tokenization = self._tokenizer.run(llm_input.prompt)
+            tokenization = checkpointer.load("TOKENIZATION", TokenizedResult)
+            if not tokenization:
+                tokenization = self._tokenizer.run(llm_input.prompt)
+                checkpointer.save("TOKENIZATION", tokenization)
 
             # Stage 3: Embedding
-            decoded_prompt = self._tokenizer._encoding.decode(tokenization.tokens)
-            embedding = self._embedder.run(decoded_prompt, self._retry_api_call)
+            embedding = checkpointer.load("EMBEDDING", EmbeddingResult)
+            if not embedding:
+                decoded_prompt = self._tokenizer._encoding.decode(tokenization.tokens)
+                embedding = self._embedder.run(decoded_prompt, self._retry_api_call)
+                checkpointer.save("EMBEDDING", embedding)
 
             # Stage 4: Transformer
-            transformer = self._transformer.run(llm_input, self._retry_api_call)
+            transformer = checkpointer.load("TRANSFORMER", TransformerResult)
+            if not transformer:
+                transformer = self._transformer.run(llm_input, self._retry_api_call)
+                checkpointer.save("TRANSFORMER", transformer)
 
             # Stage 5: Output Structuring
             total_time = time.perf_counter()-pipeline_start
@@ -411,7 +432,7 @@ if __name__ == "__main__":
     llm_input = LLMInput(
         prompt="""Explain the self-attention mechanism in exactly 3 bullet points, each no longer than two sentences.""",
         system_prompt="""You are a senior machine learning researcher. Respond with precision and clarity. Use bullet points when instructed.""",
-        temperature=0.4,
+        temperature=0.5,
         max_completion_tokens=512,
         metadata={"source": "llm_agent_demo", "version": "1.0.0"},
     )

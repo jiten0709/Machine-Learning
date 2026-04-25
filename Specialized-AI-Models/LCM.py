@@ -13,25 +13,31 @@ Meta's SONAR uses LASER2 sentence encoders for language-agnostic concept embeddi
 
 from abc import ABC, abstractmethod
 from typing import Any
-import time
+import time, nltk, json, uuid, numpy as np
 from datetime import datetime, timezone
 from openai import OpenAI, RateLimitError, APITimeoutError, APIError
-import nltk
 from pydantic import BaseModel, Field, field_validator, model_validator
-import uuid
-import numpy as np
-import json
+from pathlib import Path
 
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from logging_setup import get_logger
+from utils.logging_setup import get_logger
 logger = get_logger(__name__, log_file="lcm.log")
 
 # ==========================================
 # Variable Configuration
 # ==========================================
+from utils.state_checkpointer import StateCheckpointer
+CHECKPOINT_DIR = Path("./checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+checkpointer = StateCheckpointer(
+    directory=CHECKPOINT_DIR, 
+    filename="lcm_checkpoint.json",
+    logger=logger
+)
+
 TOKEN = os.environ['GITHUB_TOKEN']
 ENDPOINT = os.environ['GITHUB_ENDPOINT']
 CHAT_MODEL = os.environ['GITHUB_MODEL_NAME']
@@ -331,6 +337,7 @@ class SentenceSegmentationStage:
             f"✅ [SEGMENTATION] {result.sentence_count} sentences extracted | "
             f"time={elapsed:.4f}s"
         )
+        logger.debug(f"💬 [SEGMENTATION] sentences={sentences}")
         return result
 
 class SonarEmbeddingStage:
@@ -378,10 +385,10 @@ class SonarEmbeddingStage:
             dimensions=len(pooled),
             processing_time=round(elapsed, 4)
         )
-        logger.debug(
-            f"✅ [SONAR EMBEDDING] {len(concept_vectors)} vectors encoded | "
-            f"pooled dim={result.dimensions} | time={elapsed:.4f}s"
+        logger.info(
+            f"✅ [SONAR EMBEDDING] {len(concept_vectors)} vectors encoded | time={elapsed:.4f}s"
         )
+        logger.debug(f"💬 [SONAR EMBEDING] concept_vectors={concept_vectors[:5]} | pooled_concept={concept_vectors[:5]}")
         return result
 
 class DiffusionStage:
@@ -441,6 +448,7 @@ class DiffusionStage:
             processing_time= round(elapsed, 4),
         )
         logger.info(f"✅ [DIFFUSION] Complete | total_drift={total_drift:.6f} | time={elapsed:.4f}s")
+        logger.debug(f"💬 [DIFFUSION] refined_vector={result.refined_vector[:5]} | steps={steps}")
         return result
 
 class AdvancedPatterningStage:
@@ -501,6 +509,7 @@ class AdvancedPatterningStage:
             f"✅ [ADVANCED PATTERNING] {len(patterns)} patterns | "
             f"dominant='{dominant}' | time={elapsed:.4f}s"
         )
+        logger.debug(f"💬 [ADVANCED PATTERNING] patterns={patterns[:5]}")
         return result
 
 class HiddenProcessStage:
@@ -520,8 +529,7 @@ class HiddenProcessStage:
 
     def run(self, concept_vectors: list[ConceptVector], sentences: list[Sentence], retry_fn) -> HiddenProcessResult:
         logger.info(
-            f"⚙️ [HIDDEN PROCESS] Clustering {len(concept_vectors)} "
-            f"concept vectors..."
+            f"⚙️ [HIDDEN PROCESS] Clustering {len(concept_vectors)} concept vectors..."
         )
         t0 = time.perf_counter()
 
@@ -607,6 +615,7 @@ class HiddenProcessStage:
             f"✅ [HIDDEN PROCESS] {len(clusters)} clusters | "
             f"time={elapsed:.4f}s"
         )
+        logger.debug(f"💬 [HIDDEN PROCESS] insight='{insight.strip()}'")
         return result
 
 class QuantizationStage:
@@ -658,6 +667,7 @@ class QuantizationStage:
             f"compression={compression_ratio:.1f}x | "
             f"time={elapsed:.4f}s"
         )
+        logger.debug(f"💬 [QUANTIZATION] codes={codes[:20]} | range=[{v_min:.4f}, {v_max:.4f}]")
         return result
 
 # ==========================================
@@ -702,36 +712,60 @@ class LCMAgent(BaseAIAgent):
 
         try:
             # Stage 2: Sentence Segmentation
-            segmentation = self._segmenter.run(lcm_input.text)
-            if segmentation.sentence_count == 0:
-                raise ValueError("Segmentation produced zero sentences.")
+            segmentation = checkpointer.load("SENTENCE_SEGMENTATION", SegmentationResult)
+            if not segmentation:
+                segmentation = self._segmenter.run(lcm_input.text)
+                if segmentation.sentence_count == 0:
+                    raise ValueError("Segmentation produced zero sentences.")
+                checkpointer.save("SENTENCE_SEGMENTATION", segmentation)
             
             # Stage 3: SONAR Embedding
-            sonar = self._sonar.run(segmentation.sentences, self._retry_api_call)
+            sonar = checkpointer.load("SONAR_EMBEDDING", SonarEmbeddingResult)
+            if not sonar:
+                sonar = self._sonar.run(segmentation.sentences, self._retry_api_call)
+                checkpointer.save("SONAR_EMBEDDING", sonar)
 
             # Stage 4: Diffusion
-            diffusion = self._diffusion.run(sonar.pooled_concept_vector)
+            diffusion = checkpointer.load("DIFFUSION", DiffusionResult)
+            if not diffusion:
+                diffusion = self._diffusion.run(sonar.pooled_concept_vector)
+                checkpointer.save("DIFFUSION", diffusion)
 
-            # Stage 5: Advanced Patterning
-            # Stage 6: Hidden Process
-            # both run in parallel conceptually; share same sentences + vector data
-            self.logger.info("⚙️ [LCM AGENT] Running Advanced Patterning <-> Hidden Process (interleaved)...")
-            patterning = self._patterning.run(
-                segmentation.sentences,
-                lcm_input.concept_depth,
-                self._retry_api_call,
-            )
-            hidden = self._hidden.run(
-                sonar.concept_vectors,
-                segmentation.sentences,
-                self._retry_api_call,
-            )
+            # Stage 5: Advanced Patterning & Stage 6: Hidden Process
+            patterning = checkpointer.load("ADVANCED_PATTERNING", AdvancedPatterningResult)
+            hidden = checkpointer.load("HIDDEN_PROCESS", HiddenProcessResult)
+            
+            if not patterning or not hidden:
+                self.logger.info("⚙️ [LCM AGENT] Running Advanced Patterning <-> Hidden Process (interleaved)...")
+                
+            if not patterning:
+                patterning = self._patterning.run(
+                    segmentation.sentences,
+                    lcm_input.concept_depth,
+                    self._retry_api_call,
+                )
+                checkpointer.save("ADVANCED_PATTERNING", patterning)
+
+            if not hidden:
+                hidden = self._hidden.run(
+                    sonar.concept_vectors,
+                    segmentation.sentences,
+                    self._retry_api_call,
+                )
+                checkpointer.save("HIDDEN_PROCESS", hidden)
 
             # Stage 7: Quantization
-            quantization = self._quantization.run(diffusion.refined_vector)
+            quantization = checkpointer.load("QUANTIZATION", QuantizationResult)
+            if not quantization:
+                quantization = self._quantization.run(diffusion.refined_vector)
+                checkpointer.save("QUANTIZATION", quantization)
 
             # Stage 8: Final output stage
-            concept_summary = self._synthesise_summary(patterning, hidden, lcm_input)
+            concept_summary = checkpointer.load_raw_key("CONCEPT_SUMMARY")
+            if not concept_summary:
+                concept_summary = self._synthesise_summary(patterning, hidden, lcm_input)
+                checkpointer.save_raw_key("CONCEPT_SUMMARY", concept_summary)
+
             total_time = time.perf_counter() - pipeline_start
             output = LCMOutput(
                 request_id=lcm_input.request_id,
@@ -798,51 +832,6 @@ class LCMAgent(BaseAIAgent):
         print(f"\n{divider}")
         print("  🟢 LCM AGENT — Large Concept Model Pipeline Result")
         print(f"{divider}")
-
-        # print(f"  Request ID        : {output.request_id}")
-        # print(f"  Status            : {output.status.value}")
-        # print(f"  Total Time        : {output.total_pipeline_time}s")
-        # print(f"{divider}")
-        # print(f"  ✂️  SENTENCE SEGMENTATION")
-        # print(f"     Sentences       : {output.segmentation.sentence_count}")
-        # for s in output.segmentation.sentences[:3]:
-        #     print(f"     [{s.index}] {s.text[:80]}...")
-        # print(f"     Time            : {output.segmentation.processing_time}s")
-        # print(f"{divider}")
-        # print(f"  🧠 SONAR EMBEDDING")
-        # print(f"     Vectors Encoded : {len(output.sonar_embedding.concept_vectors)}")
-        # print(f"     Dimensions      : {output.sonar_embedding.dimensions}")
-        # print(f"     Pooled[0:3]     : {output.sonar_embedding.pooled_concept_vector[:3]}")
-        # print(f"     Time            : {output.sonar_embedding.processing_time}s")
-        # print(f"{divider}")
-        # print(f"  🌀 DIFFUSION")
-        # print(f"     Steps           : {len(output.diffusion.steps)}")
-        # print(f"     Total Drift     : {output.diffusion.total_drift}")
-        # print(f"     Time            : {output.diffusion.processing_time}s")
-        # print(f"{divider}")
-        # print(f"  🔬 ADVANCED PATTERNING")
-        # print(f"     Dominant Theme  : {output.advanced_patterning.dominant_theme}")
-        # for p in output.advanced_patterning.patterns:
-        #     print(f"     [{p.pattern_id}] {p.label} (conf={p.confidence:.2f})")
-        #     print(f"          → {p.description}")
-        # print(f"     Time            : {output.advanced_patterning.processing_time}s")
-        # print(f"{divider}")
-        # print(f"  🔗 HIDDEN PROCESS")
-        # print(f"     Clusters        : {output.hidden_process.cluster_count}")
-        # for c in output.hidden_process.clusters:
-        #     print(
-        #         f"     Cluster {c.cluster_id}: sentences {c.sentence_indices} "
-        #         f"| cohesion={c.cohesion_score}"
-        #     )
-        # print(f"     Emergent Insight: {output.hidden_process.cross_cluster_insight}")
-        # print(f"     Time            : {output.hidden_process.processing_time}s")
-        # print(f"{divider}")
-        # print(f"  📦 QUANTIZATION")
-        # print(f"     Bits            : {output.quantization.bits}")
-        # print(f"     Codebook Size   : {output.quantization.codebook_size}")
-        # print(f"     Compression     : {output.quantization.compression_ratio}x")
-        # print(f"     Codes[0:8]      : {output.quantization.codes[:8]}")
-        # print(f"     Time            : {output.quantization.processing_time}s")
 
         print(f"{divider}")
         print(f"  📤 CONCEPT SUMMARY\n")
