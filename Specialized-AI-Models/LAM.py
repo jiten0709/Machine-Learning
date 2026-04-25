@@ -32,7 +32,7 @@ try:
 except ImportError:
     raise ImportError("❌ No env file found. Please create a .env file.")
 
-from logging_setup import get_logger
+from utils.logging_setup import get_logger
 import logging
 logger = get_logger(__name__, log_file="lam.log")
 def _ltag(tag: str, level: int, msg: str, lgr: logging.Logger = logger) -> None:
@@ -41,6 +41,15 @@ def _ltag(tag: str, level: int, msg: str, lgr: logging.Logger = logger) -> None:
 # ==========================================
 # Variable Configuration
 # ==========================================
+from utils.state_checkpointer import StateCheckpointer
+CHECKPOINT_DIR = Path("./checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+checkpointer = StateCheckpointer(
+    directory=CHECKPOINT_DIR, 
+    filename="lam_checkpoint.json",
+    logger=logger
+)
+
 TOKEN = os.environ['GITHUB_TOKEN']
 ENDPOINT = os.environ['GITHUB_ENDPOINT']
 CHAT_MODEL = os.environ['GITHUB_MODEL_NAME']
@@ -51,9 +60,6 @@ RETRY_BACKOFF_BASE = 2.0
 MAX_FEEDBACK_ITERATIONS = 3 # max re-plan cycles in feedback loop
 MEMORY_EPISODIC_LIMIT = 50 # max episodic memory slots
 MEMORY_SEMANTIC_LIMIT = 100 # max semantic fact slots
-
-CHECKPOINT_DIR = Path("./checkpoints")
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 PERCEPTION_PROMPT_TEMPLATE = """
 Instruction: {instruction}
@@ -674,77 +680,6 @@ class MemoryStore:
                 logger_instance.debug(f"[{mem.confidence:.2f} | {mem.category}] {mem.fact}")
 
 # ==========================================
-# State Checkpointing
-# ==========================================
-class StateCheckpointer:
-    """
-    Persists individual stage results to a single static JSON file (lam_checkpoint.json).
-    Each stage key maps to its Pydantic model's .model_dump() / .dict().
-    Supports:
-      - save(key, model)     → write one stage
-      - load(key, ModelCls)  → restore typed instance or None
-      - exists(key)          → bool
-      - list_sessions()      → returns the static file if it exists
-    """
-
-    def __init__(self, directory: Path = CHECKPOINT_DIR) -> None:
-        self.dir = directory
-        self.dir.mkdir(parents=True, exist_ok=True)
-
-    def _path(self, request_id: str) -> Path:
-        return self.dir / "lam_checkpoint.json"
-
-    def _load_raw(self, request_id: str) -> Dict:
-        p = self._path(request_id)
-        if not p.exists():
-            return {}
-        return json.loads(p.read_text(encoding="utf-8"))
-
-    def _save_raw(self, request_id: str, data: Dict) -> None:
-        p = self._path(request_id)
-        p.write_text(json.dumps(data, default=str, indent=2), encoding="utf-8")
-        _ltag("checkpoint", logging.DEBUG, f"Checkpoint saved → {p.name}")
-
-    def exists(self, request_id: str, key: str) -> bool:
-        return key in self._load_raw(request_id)
-
-    def save(self, request_id: str, key: str, model: BaseModel) -> None:
-        data = self._load_raw(request_id)
-        data[key] = model.model_dump(mode="json")
-        data["__updated_at__"] = datetime.now(timezone.utc).isoformat()
-        self._save_raw(request_id, data)
-        _ltag("checkpoint", logging.INFO, f"Stage '{key}' checkpointed in static file")
-
-    def load(self, request_id: str, key: str, model_cls: type) -> Optional[Any]:
-        data = self._load_raw(request_id)
-        if key not in data:
-            return None
-        try:
-            instance = model_cls.model_validate(data[key]) 
-            _ltag("checkpoint", logging.INFO, f"✅ Yes I got this checkpoint; resuming from stage '{key}'")
-            return instance
-        except Exception as e:
-            _ltag("checkpoint", logging.WARNING, f"Could not restore '{key}': {e}")
-            return None
-
-    def save_raw_key(self, request_id: str, key: str, value: Any) -> None:
-        """Persist a plain-Python value (e.g. a string summary)."""
-        data = self._load_raw(request_id)
-        data[key] = value
-        self._save_raw(request_id, data)
-
-    def load_raw_key(self, request_id: str, key: str) -> Optional[Any]:
-        data = self._load_raw(request_id)
-        if key in data:
-            _ltag("checkpoint", logging.INFO, f"✅ Yes I got this checkpoint; resuming from stage '{key}'")
-            return data[key]
-        return None
-
-    def list_sessions(self) -> List[str]:
-        p = self.dir / "lam_checkpoint.json"
-        return ["lam_checkpoint"] if p.exists() else []
-    
-# ==========================================
 # Pipeline Stages
 # ==========================================
 class PerceptionSystemStage:
@@ -1323,7 +1258,6 @@ class LAMAgent(BaseAIAgent):
         self._neuro_symbolic = NeuroSymbolicIntegrationStage()
         self._feedback = FeedbackIntegrationStage()
         self._memory_store = MemoryStore()
-        self._checkpointer = StateCheckpointer()
         self._registered_tools: List[str] = []  
 
     def register_tool(self, tool_name: str, description: str = "") -> None:
@@ -1334,14 +1268,13 @@ class LAMAgent(BaseAIAgent):
             extra={"tag": "tool"}
         )
 
-    def process(self, lam_input: LAMInput, checkpoint_file: str = None) -> LAMOutput:
+    def process(self, lam_input: LAMInput) -> LAMOutput:
         """
         Execute the full 9-stage LAM pipeline with typed checkpointing.
         Resume is automatic — if a checkpoint exists for request_id, completed stages are skipped.
         """
         pipeline_start = time.perf_counter()
         rid = lam_input.request_id
-        cp  = self._checkpointer
 
         self.logger.info(
             f"Pipeline START | request_id={rid[:8]} | model={CHAT_MODEL}",
@@ -1356,40 +1289,40 @@ class LAMAgent(BaseAIAgent):
 
         try:
             # ── Stage 2: Perception ───────────────────────────────────────────
-            perception = cp.load(rid, "perception", PerceptionResult)
+            perception = checkpointer.load("perception", PerceptionResult)
             if perception is None:
                 perception = self._perception.run(lam_input, self)
-                cp.save(rid, "perception", perception)
+                checkpointer.save("perception", perception)
 
             # ── Stage 3: Intent Recognition ───────────────────────────────────
-            intent = cp.load(rid, "intent", IntentRecognitionResult)
+            intent = checkpointer.load("intent", IntentRecognitionResult)
             if intent is None:
                 intent = self._intent.run(lam_input, perception, self)
-                cp.save(rid, "intent", intent)
+                checkpointer.save("intent", intent)
 
             # ── Stage 4: Task Breakdown ───────────────────────────────────────
-            task_breakdown = cp.load(rid, "task_breakdown", TaskBreakdownResult)
+            task_breakdown = checkpointer.load("task_breakdown", TaskBreakdownResult)
             if task_breakdown is None:
                 task_breakdown = self._task_breakdown.run(lam_input, intent, self)
-                cp.save(rid, "task_breakdown", task_breakdown)
+                checkpointer.save("task_breakdown", task_breakdown)
 
             # ── Stage 5 (pre-memory): Initial Action Plan ────────────────────
             #    We plan first without memory context, then enrich memory,
             #    then re-plan if memory adds significant context.
-            action_plan = cp.load(rid, "action_plan", ActionPlanResult)
+            action_plan = checkpointer.load("action_plan", ActionPlanResult)
             if action_plan is None:
                 action_plan = self._action_plan.run(
                     lam_input, task_breakdown, intent, self, memory_context=""
                 )
-                cp.save(rid, "action_plan", action_plan)
+                checkpointer.save("action_plan", action_plan)
 
             # ── Stage 6: Memory System ←→ Stage 5 feedback ───────────────────
-            memory = cp.load(rid, "memory", MemorySystemResult)
+            memory = checkpointer.load("memory", MemorySystemResult)
             if memory is None:
                 memory = self._memory_stage.run(
                     lam_input, intent, action_plan, self._memory_store, self
                 )
-                cp.save(rid, "memory", memory)
+                checkpointer.save("memory", memory)
                 # Re-plan enriched with memory context (bidirectional loop)
                 if memory.memory_hits > 0 and memory.relevant_context.strip():
                     self.logger.info(
@@ -1400,27 +1333,27 @@ class LAMAgent(BaseAIAgent):
                         lam_input, task_breakdown, intent, self,
                         memory_context=memory.relevant_context
                     )
-                    cp.save(rid, "action_plan", action_plan)
+                    checkpointer.save("action_plan", action_plan)
 
             # ── Stage 7: Neuro-Symbolic Integration ───────────────────────────
-            neuro_symbolic = cp.load(rid, "neuro_symbolic", NeuroSymbolicResult)
+            neuro_symbolic = checkpointer.load("neuro_symbolic", NeuroSymbolicResult)
             if neuro_symbolic is None:
                 neuro_symbolic = self._neuro_symbolic.run(
                     lam_input, action_plan, intent, self
                 )
-                cp.save(rid, "neuro_symbolic", neuro_symbolic)
+                checkpointer.save("neuro_symbolic", neuro_symbolic)
 
             # ── Stage 8: Feedback Integration ─────────────────────────────────
-            feedback = cp.load(rid, "feedback", FeedbackIntegrationResult)
+            feedback = checkpointer.load("feedback", FeedbackIntegrationResult)
             if feedback is None:
                 feedback = self._feedback.run(
                     lam_input, neuro_symbolic, action_plan,
                     intent, self._memory_store, self
                 )
-                cp.save(rid, "feedback", feedback)
+                checkpointer.save("feedback", feedback)
 
             # ── Stage 9: Output ───────────────────────────────────────────────
-            final_summary = cp.load_raw_key(rid, "final_summary")
+            final_summary = checkpointer.load_raw_key("final_summary")
             if final_summary is None:
                 final_summary = self._gpt_text_response(
                     system="You are an action plan reporter. Be concise and precise.",
@@ -1434,7 +1367,7 @@ class LAMAgent(BaseAIAgent):
                     ),
                     max_tokens=200,
                 )
-                cp.save_raw_key(rid, "final_summary", final_summary)
+                checkpointer.save_raw_key("final_summary", final_summary)
 
             executable_actions = [
                 a for a in action_plan.actions
