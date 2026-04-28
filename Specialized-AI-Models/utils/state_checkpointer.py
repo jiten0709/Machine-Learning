@@ -49,7 +49,7 @@ class StateCheckpointer:
             return None
         try:
             instance = model_cls.model_validate(data[key]) 
-            self.logger.info(f"✅ Loaded checkpoint; resuming from stage '{key}'")
+            self.logger.info(f"♻️ Loaded checkpoint; resuming from stage '{key}'")
             return instance
         except Exception as e:
             self.logger.warning(f"⚠️ Could not restore '{key}': {e}")
@@ -63,7 +63,7 @@ class StateCheckpointer:
     def load_raw_key(self, key: str) -> Optional[Any]:
         data = self._load_raw()
         if key in data:
-            self.logger.info(f"✅ Loaded raw checkpoint; resuming from stage '{key}'")
+            self.logger.info(f"♻️ Loaded raw checkpoint; resuming from stage '{key}'")
             return data[key]
         return None
 
