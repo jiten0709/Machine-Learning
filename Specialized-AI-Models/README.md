@@ -10,6 +10,7 @@ A modular, production-grade repository showcasing distinct AI agent architecture
 - [Agent: LCM (Large Concept Model)](#-agent-2-lcm-large-concept-model)
 - [Agent: LAM (Large Action Model)](#-agent-3-lam-large-action-model)
 - [Agent: MoE (Mixture of Experts)](#-agent-4-moe-mixture-of-experts)
+- [Agent: VLM (Vision-Language Model)](#-agent-5-vlm-vision-language-model)
 - [Logging & Observability](#-logging--observability)
 - [Contributing](#-contributing)
 - [Security & Secrets](#-security--secrets)
@@ -180,7 +181,7 @@ The MoE (Mixture of Experts) Agent brings the sparse activation architecture of 
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/moe.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/moe.png" alt="MoE pipeline flow" style="max-width:100%;width:800px;">
   <figcaption align="center">MoE pipeline flow</figcaption>
 </figure>
 
@@ -215,6 +216,49 @@ The MoE (Mixture of Experts) Agent brings the sparse activation architecture of 
 - **Routing Overhead & Latency:** The pipeline requires sequential bottlenecks (routing must finish before experts run; experts must finish before synthesis runs), inherently increasing the time-to-first-token compared to single-shot inferences.
 - **Context Window Amplification:** Synthesizing multiple expert outputs requires feeding all generated text (plus patterning instructions) into the final `AdvancedPatterningStage` context window, rapidly eating into token limits for verbose experts.
 - **Expert Domain Overlap:** If expert system prompts are not sufficiently distinct, the router's softmax distribution will exhibit high entropy (indecision), leading to redundant responses and wasted compute during parallel activation.
+
+## 🔴 Agent 5: VLM (Vision-Language Model)
+
+### Description
+
+The VLM (Vision-Language Model) Agent is a sophisticated multimodal orchestration pipeline that achieves deep visual-textual alignment through a sequential, multi-agent architecture. Mirroring the design patterns of models like LLaVA and Flamingo, it utilizes a dual-stream encoding approach: independently extracting visual feature maps and text embeddings. It then projects both modalities into a shared latent space, resolves conflicts via simulated cross-attention, and generates heavily grounded, visually-cited responses.
+
+**Pipeline Flow:**
+
+<figure>
+  <img src="assets/image/vlm.png" alt="VLM pipeline flow" style="max-width:100%;width:800px;">
+  <figcaption align="center">VLM pipeline flow</figcaption>
+</figure>
+
+| Stage                    | Role                                                        | Implementation Strategy                                               |
+| :----------------------- | :---------------------------------------------------------- | :-------------------------------------------------------------------- |
+| **Image Input**          | Ingest, validate & preprocess image                         | Pydantic model; base64 encode from file/URL/bytes                     |
+| **Text Input**           | Validate textual query/instruction                          | Pydantic model with prompt classification                             |
+| **Vision Encoder**       | Extract visual features & patch embeddings                  | GPT-4.1 vision pass → structured visual feature map                   |
+| **Text Encoder**         | Encode text into semantic representation                    | OpenAI text-embedding-3-small → semantic vector                       |
+| **Projection Interface** | Align vision & text into shared latent space                | Learned-style linear projection simulation via cosine alignment score |
+| **Multimodal Processor** | Cross-attention fusion of visual + textual tokens           | GPT-4.1 multimodal fusion with joint attention prompt                 |
+| **Language Model**       | Generate grounded language output from fused representation | GPT-4.1 with vision — image + text in single call                     |
+| **Output Generation**    | Structured, validated multimodal response                   | VLMOutput with full stage payloads                                    |
+
+### 🧠 Agent Capabilities
+
+- **Dual-Stream Encoding:** Independently processes text into dense semantic embeddings while using GPT-4.1's vision capabilities to extract a highly structured visual feature map (detecting scene types, objects, layout, regions, and spatial hints).
+- **Latent Space Projection:** Computationally aligns vision and text representations using a Jaccard/cosine-similarity proxy, identifying shared explicit concepts to ensure both modalities are properly synchronized.
+- **Cross-Attention Fusion:** Simulates explicit cross-attention by mapping specific textual query tokens to precise visual region IDs, generating a unified multimodal context and resolving visual-textual conflicts before final generation.
+- **Deterministically Grounded Generation:** The final language model layer is forced to cite specific visual regions, producing both a traceable output and a calculated `grounding_score` to mathematically evaluate hallucination resistance.
+
+### Use-Cases
+
+- **Traceable Visual QA:** Enterprise applications (e.g., insurance claim evaluation, medical scan parsing) where answers must be explicitly tied to specific regions (e.g., "R001: top-left corner") rather than generalised guesses.
+- **Multimodal RAG Ingestion:** Serving as a highly structured pre-processing engine that converts raw images into semantically aligned, tokenized JSON metadata (complete with depth, texture, and scene analysis) for vector storage.
+- **Spatial & Scene Understanding:** Complex robotics or autonomous driving edge-cases where relative spatial layouts, depth estimation, and complex object interactions need thorough, deductive textual explanation.
+
+### Limitations
+
+- **Simulated Projection Constraint:** True VLMs use learned neural weights (like Perceiver resamplers or MLPs) to fuse embeddings; this agent approximates that fusion using sequential LLM reasoning passes, constraining alignment quality to the model's zero-shot contextual abilities.
+- **Extreme Token & Latency Overhead:** Executing four sequential LLM/embedding calls (Vision, Text, Projection, Fusion) combined with high-detail image patch tokenization (up to 765 tokens per image) makes this pipeline inherently slow and token-expensive.
+- **Heuristic Grounding Metrics:** The final `grounding_score` relies heavily on exact term-matching heuristics (checking if visual labels appear verbatim in the output text), which may underreport grounding if the model uses synonyms or implicit references.
 
 ## 📊 Logging & Observability
 

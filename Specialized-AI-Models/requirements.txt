@@ -4,6 +4,7 @@ appnope==0.1.4
 asttokens==3.0.1
 certifi==2026.2.25
 charset-normalizer==3.4.7
+click==8.3.2
 comm==0.2.3
 debugpy==1.8.20
 decorator==5.2.1
@@ -19,10 +20,13 @@ ipython==9.12.0
 ipython-pygments-lexers==1.1.1
 jedi==0.19.2
 jiter==0.13.0
+joblib==1.5.3
 jupyter-client==8.8.0
 jupyter-core==5.9.1
 matplotlib-inline==0.2.1
 nest-asyncio==1.6.0
+nltk==3.9.4
+numpy==2.4.4
 openai==2.30.0
 packaging==26.0
 parso==0.8.6
