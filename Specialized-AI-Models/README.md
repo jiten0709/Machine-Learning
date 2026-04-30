@@ -61,10 +61,9 @@ The LLM Agent is a lightweight, production-grade pipeline designed to transform 
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/llm.png" alt="LLM pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">LLM pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/llm.png" alt="LLM pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage            | Role                                    | Implementation Strategy          |
 | :--------------- | :-------------------------------------- | :------------------------------- |
@@ -94,10 +93,9 @@ The LCM (Large Concept Model) Agent is an advanced analytical pipeline that oper
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/lcm.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">LCM pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/lcm.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage                     | Role                                                 | Implementation Strategy                               |
 | :------------------------ | :--------------------------------------------------- | :---------------------------------------------------- |
@@ -137,10 +135,9 @@ The LAM (Large Action Model) Agent is a production-grade autonomous orchestratio
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/lam.png" alt="LAM pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">LAM pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/lam.png" alt="LAM pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage                          | Role                                            | Implementation Strategy                        |
 | :----------------------------- | :---------------------------------------------- | :--------------------------------------------- |
@@ -181,10 +178,9 @@ The MoE (Mixture of Experts) Agent brings the sparse activation architecture of 
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/moe.png" alt="MoE pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">MoE pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/moe.png" alt="MoE pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage                   | Role                                         | Implementation Strategy                                    |
 | :---------------------- | :------------------------------------------- | :--------------------------------------------------------- |
@@ -226,10 +222,9 @@ The VLM (Vision-Language Model) Agent is a sophisticated multimodal orchestratio
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/vlm.png" alt="VLM pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">VLM pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/vlm.png" alt="VLM pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage                    | Role                                                        | Implementation Strategy                                               |
 | :----------------------- | :---------------------------------------------------------- | :-------------------------------------------------------------------- |
@@ -269,10 +264,9 @@ The SLM (Small Language Model) Agent is an efficiency-first pipeline specificall
 
 **Pipeline Flow:**
 
-<figure>
-  <img src="assets/image/slm.png" alt="SLM pipeline flow" style="max-width:100%;width:800px;" align="center">
-  <figcaption align="center">SLM pipeline flow</figcaption>
-</figure>
+<div align="center">
+  <img src="assets/image/slm.png" alt="SLM pipeline flow" style="max-width:100%;width:800px;">
+</div>
 
 | Stage                     | Role                                              | Implementation Strategy                                            |
 | :------------------------ | :------------------------------------------------ | :----------------------------------------------------------------- |
