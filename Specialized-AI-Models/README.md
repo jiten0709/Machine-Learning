@@ -11,6 +11,7 @@ A modular, production-grade repository showcasing distinct AI agent architecture
 - [Agent: LAM (Large Action Model)](#-agent-3-lam-large-action-model)
 - [Agent: MoE (Mixture of Experts)](#-agent-4-moe-mixture-of-experts)
 - [Agent: VLM (Vision-Language Model)](#-agent-5-vlm-vision-language-model)
+- [Agent: SLM (Small Language Model)](#-agent-6-slm-small-language-model)
 - [Logging & Observability](#-logging--observability)
 - [Contributing](#-contributing)
 - [Security & Secrets](#-security--secrets)
@@ -61,7 +62,7 @@ The LLM Agent is a lightweight, production-grade pipeline designed to transform 
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/llm.png" alt="LLM pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/llm.png" alt="LLM pipeline flow" style="max-width:100%;width:800px;" align="center">
   <figcaption align="center">LLM pipeline flow</figcaption>
 </figure>
 
@@ -94,7 +95,7 @@ The LCM (Large Concept Model) Agent is an advanced analytical pipeline that oper
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/lcm.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/lcm.png" alt="LCM pipeline flow" style="max-width:100%;width:800px;" align="center">
   <figcaption align="center">LCM pipeline flow</figcaption>
 </figure>
 
@@ -137,7 +138,7 @@ The LAM (Large Action Model) Agent is a production-grade autonomous orchestratio
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/lam.png" alt="LAM pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/lam.png" alt="LAM pipeline flow" style="max-width:100%;width:800px;" align="center">
   <figcaption align="center">LAM pipeline flow</figcaption>
 </figure>
 
@@ -181,7 +182,7 @@ The MoE (Mixture of Experts) Agent brings the sparse activation architecture of 
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/moe.png" alt="MoE pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/moe.png" alt="MoE pipeline flow" style="max-width:100%;width:800px;" align="center">
   <figcaption align="center">MoE pipeline flow</figcaption>
 </figure>
 
@@ -226,7 +227,7 @@ The VLM (Vision-Language Model) Agent is a sophisticated multimodal orchestratio
 **Pipeline Flow:**
 
 <figure>
-  <img src="assets/image/vlm.png" alt="VLM pipeline flow" style="max-width:100%;width:800px;">
+  <img src="assets/image/vlm.png" alt="VLM pipeline flow" style="max-width:100%;width:800px;" align="center">
   <figcaption align="center">VLM pipeline flow</figcaption>
 </figure>
 
@@ -259,6 +260,49 @@ The VLM (Vision-Language Model) Agent is a sophisticated multimodal orchestratio
 - **Simulated Projection Constraint:** True VLMs use learned neural weights (like Perceiver resamplers or MLPs) to fuse embeddings; this agent approximates that fusion using sequential LLM reasoning passes, constraining alignment quality to the model's zero-shot contextual abilities.
 - **Extreme Token & Latency Overhead:** Executing four sequential LLM/embedding calls (Vision, Text, Projection, Fusion) combined with high-detail image patch tokenization (up to 765 tokens per image) makes this pipeline inherently slow and token-expensive.
 - **Heuristic Grounding Metrics:** The final `grounding_score` relies heavily on exact term-matching heuristics (checking if visual labels appear verbatim in the output text), which may underreport grounding if the model uses synonyms or implicit references.
+
+## 🟡 Agent 6: SLM (Small Language Model)
+
+### Description
+
+The SLM (Small Language Model) Agent is an efficiency-first pipeline specifically engineered for resource-constrained environments like mobile devices, edge IoT, and microcontrollers. Inspired by models like Phi-3 and Gemma-2B, this architecture structurally enforces strict compute, memory, and latency constraints. Every stage of the pipeline—from multi-pass token compression and dimensionality reduction to aggressive quantization and KV caching—is optimized to maximize capabilities while minimizing the operational footprint, culminating in a mathematically rigorous efficiency scorecard.
+
+**Pipeline Flow:**
+
+<figure>
+  <img src="assets/image/slm.png" alt="SLM pipeline flow" style="max-width:100%;width:800px;" align="center">
+  <figcaption align="center">SLM pipeline flow</figcaption>
+</figure>
+
+| Stage                     | Role                                              | Implementation Strategy                                            |
+| :------------------------ | :------------------------------------------------ | :----------------------------------------------------------------- |
+| **Input Processing**      | Validate, normalise & budget-gate the input       | Pydantic model with strict token ceiling & device profile          |
+| **Compact Tokenization**  | Aggressive token compression & deduplication      | tiktoken + BPE merging simulation + vocabulary pruning             |
+| **Optimized Embeddings**  | Lightweight, dimension-reduced semantic vectors   | text-embedding-3-small with PCA-style dim reduction to 128-d       |
+| **Efficient Transformer** | Inference with compute-budget constraints         | GPT-4.1 with strict token cap + latency tracking                   |
+| **Model Quantization**    | Compress model weights to low-bit representation  | INT4/INT8 scalar quantization of embedding weights                 |
+| **Memory Optimization**   | KV-cache simulation + memory footprint profiling  | In-process cache + memory budget enforcement                       |
+| **Edge Deployment**       | Package response for resource-constrained targets | Payload sizing, latency SLA validation, device compatibility check |
+| **Output Generation**     | Structured, validated lightweight response        | `SLMOutput` with full efficiency metrics                           |
+
+### 🧠 Agent Capabilities
+
+- **Target-Driven Execution Profiles:** Automatically calibrates latency SLAs, RAM limits, payload ceilings, and quantization modes based on explicitly defined hardware targets (`CLOUD`, `MOBILE`, `EDGE_IOT`, `MICROCONTROLLER`).
+- **Aggressive Data Compression:** Implements a three-pass `CompactTokenizationStage` (truncation, duplicate removal, vocab coverage) and a seeded J-L orthonormalized projection matrix to reduce 1536-d embeddings to 128-d (achieving a 12x memory reduction).
+- **Simulated Quantization & Caching:** Simulates INT4/INT8 post-training quantization across 7 neural network layers to track reconstruction MSE, while utilizing a SHA-256 keyed bounded LRU KV-Cache to skip recomputations for identical prompts.
+- **Strict Edge Deployment Validation:** Employs Shannon entropy-based payload compression, gating the final output behind rigid SLAs (latency, size, ratio) and returning a `DEGRADED` status if the target hardware boundaries are breached.
+
+### Use-Cases
+
+- **IoT and Edge Computing:** Deploying intelligence directly to microcontrollers or edge sensors where RAM limits and network payloads are heavily constricted and round-trip latency to the cloud is unacceptable.
+- **On-Device Mobile Applications:** Running lightweight semantic processing and generation directly on smartphones, effectively managing thermal limits and battery life through optimized KV-caching.
+- **Cost-Optimized Batch Processing:** Utilizing the profound compression ratios to process massive datasets in cloud environments at a fraction of the compute and memory overhead of a traditional LLM.
+
+### Limitations
+
+- **Information Loss:** The aggressive pipeline dimensionality reduction (PCA approximation) and INT4/INT8 quantization inherently strip semantic nuance and increase reconstruction error, degrading output quality on highly complex tasks.
+- **Extreme Context Constraint:** Enforces a hard cap of 512 input tokens (`SLM_MAX_INPUT_TOKENS`) and operates on a heavily pruned 32k vocabulary, making it completely unviable for long-context tasks like document summarization.
+- **Degradation Sensitivity:** Because edge orchestration gates outputs based on strict hardware profiles, slight variations in prompt complexity easily trigger latency or memory SLA violations, marking the pipeline output as degraded.
 
 ## 📊 Logging & Observability
 
