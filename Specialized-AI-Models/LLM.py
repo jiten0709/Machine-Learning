@@ -14,15 +14,12 @@ Highlights
 - Usage: run as a script (python3 LLM.py) or instantiate via create_llm_agent(api_key, endpoint).
 """
 
-import os
-from openai import OpenAI, APIError, RateLimitError, APITimeoutError
-import time
+import os, re, json, time, uuid, tiktoken
+from openai import OpenAI, APIError, RateLimitError, APITimeoutError, APIConnectionError
 from abc import ABC, abstractmethod
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Callable
 from pydantic import BaseModel, Field, field_validator, model_validator
-import uuid
 from datetime import datetime, timezone
-import tiktoken
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -61,50 +58,109 @@ RETRY_BACKOFF_BASE = 2.0
 class BaseAIAgent(ABC):
     """Abstract base class defining the shared contract for all 8 AI agents."""
 
-    def __init__(self, client: OpenAI | None):
+    def __init__(self, client: Optional[OpenAI] = None) -> None:
         if client is not None:
             self.client = client
         else:
-            self.client = OpenAI(
-                base_url=ENDPOINT,
-                api_key=TOKEN,
-            )
-        self.logger = get_logger(__name__, log_file="llm.log")
+            self.client = OpenAI(base_url=ENDPOINT, api_key=TOKEN)
     
     @abstractmethod
     def process(self, input_data: Any) -> Any:
         """Core execution pipeline to be implemented by each specialized agent."""
         ...
 
-    def _retry_api_call(self, fn, *args, **kwargs):
+    def _retry_api_call(self, fn: Callable, *args, **kwargs) -> Any:
         """
         Exponential-backoff retry wrapper for any OpenAI API call.
         Handles: RateLimitError, APITimeoutError, APIError.
         """
+        last_exc: Optional[Exception] = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 return fn(*args, **kwargs)
             except RateLimitError as e:
                 wait = RETRY_BACKOFF_BASE ** attempt
-                self.logger.warning(
-                    f"🔄 Rate limit hit (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Retrying in {wait}s... | {e}"
+                logger.warning(
+                    f"🚨 Rate-limit (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
                 )
                 time.sleep(wait)
+                last_exc = e
+            except APIConnectionError as e:       # FIX-05
+                wait = RETRY_BACKOFF_BASE * attempt
+                logger.warning(
+                    f"🚨 Connection error (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
+                )
+                time.sleep(wait)
+                last_exc = e
             except APITimeoutError as e:
-                wait = RETRY_BACKOFF_BASE ** attempt
-                self.logger.warning(
-                    f"⏱️  Timeout (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Retrying in {wait}s... | {e}"
+                wait = RETRY_BACKOFF_BASE * attempt
+                logger.warning(
+                    f"🚨 Timeout (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
+                    extra={"tag": "retry"}
                 )
                 time.sleep(wait)
+                last_exc = e
             except APIError as e:
-                self.logger.error(f"API error on attempt {attempt}: {e}")
+                logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
                 if attempt == MAX_RETRIES:
                     raise
                 time.sleep(RETRY_BACKOFF_BASE ** attempt)
+                last_exc = e
+        raise RuntimeError(f"🚨 All {MAX_RETRIES} API retry attempts exhausted.") from last_exc
+    
+    def _gpt_json_response(self, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> dict:
+        """wrapper for GPT call with JSON response format."""
+        response = self._retry_api_call(
+            self.client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"}
+        )
+        raw = (response.choices[0].message.content or "{}").strip()
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        
+        try:
+            data = json.loads(clean)
+            logger.debug(f"🔍 parsed json: {data}")
+            return data
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSONDecodeError: {e} | Attempting extraction. Raw: {raw}")
+            # Attempt to extract innermost or bounds of { }
+            start = clean.find("{")
+            end = clean.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(clean[start:end+1])
+                    logger.debug(f"🔍 recovered json: {data}")
+                    return data
+                except json.JSONDecodeError:
+                    pass
+                    
+            logger.error("Failed to recover JSON, returning empty dict to prevent crash.")
+            return {}
 
-        raise RuntimeError(f"All {MAX_RETRIES} API retry attempts exhausted.")
+    def _gpt_text_response(self, system: str, user: str, max_tokens: int = 800, temperature: float = 0.3) -> str:
+        """wrapper for GPT call with plain text response format."""
+        response = self._retry_api_call(
+            self.client.chat.completions.create,
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        res = (response.choices[0].message.content or "").strip()
+        logger.debug(f"🔍 raw gpt text response: {res}")
+        return res
 
 # ==========================================
 # Data Contracts (Pydantic models)

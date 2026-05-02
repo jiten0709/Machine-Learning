@@ -354,7 +354,6 @@ class MoEOutput(BaseModel):
 # ==========================================
 # ABSTRACT BASE  (shared across all 8 agents)
 # ==========================================
-
 class BaseAIAgent(ABC):
     """Abstract base class defining the shared contract for all 8 AI agents."""
 
@@ -362,11 +361,7 @@ class BaseAIAgent(ABC):
         if client is not None:
             self.client = client
         else:
-            self.client = OpenAI(
-                base_url=ENDPOINT,
-                api_key=TOKEN,
-            )
-        self.logger = get_logger(__name__, log_file="moe.log")
+            self.client = OpenAI(base_url=ENDPOINT, api_key=TOKEN)
     
     @abstractmethod
     def process(self, input_data: Any) -> Any:
@@ -384,7 +379,7 @@ class BaseAIAgent(ABC):
                 return fn(*args, **kwargs)
             except RateLimitError as e:
                 wait = RETRY_BACKOFF_BASE ** attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Rate-limit (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
@@ -392,7 +387,7 @@ class BaseAIAgent(ABC):
                 last_exc = e
             except APIConnectionError as e:       # FIX-05
                 wait = RETRY_BACKOFF_BASE * attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Connection error (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
@@ -400,14 +395,14 @@ class BaseAIAgent(ABC):
                 last_exc = e
             except APITimeoutError as e:
                 wait = RETRY_BACKOFF_BASE * attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Timeout (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
                 time.sleep(wait)
                 last_exc = e
             except APIError as e:
-                self.logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
+                logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
                 if attempt == MAX_RETRIES:
                     raise
                 time.sleep(RETRY_BACKOFF_BASE ** attempt)

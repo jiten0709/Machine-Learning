@@ -476,7 +476,6 @@ class LAMOutput(BaseModel):
 # ==========================================
 # ABSTRACT BASE  (shared across all 8 agents)
 # ==========================================
-
 class BaseAIAgent(ABC):
     """Abstract base class defining the shared contract for all 8 AI agents."""
 
@@ -484,11 +483,7 @@ class BaseAIAgent(ABC):
         if client is not None:
             self.client = client
         else:
-            self.client = OpenAI(
-                base_url=ENDPOINT,
-                api_key=TOKEN,
-            )
-        self.logger = get_logger(__name__, log_file="lam.log")
+            self.client = OpenAI(base_url=ENDPOINT, api_key=TOKEN)
     
     @abstractmethod
     def process(self, input_data: Any) -> Any:
@@ -506,7 +501,7 @@ class BaseAIAgent(ABC):
                 return fn(*args, **kwargs)
             except RateLimitError as e:
                 wait = RETRY_BACKOFF_BASE ** attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Rate-limit (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
@@ -514,7 +509,7 @@ class BaseAIAgent(ABC):
                 last_exc = e
             except APIConnectionError as e:       # FIX-05
                 wait = RETRY_BACKOFF_BASE * attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Connection error (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
@@ -522,21 +517,21 @@ class BaseAIAgent(ABC):
                 last_exc = e
             except APITimeoutError as e:
                 wait = RETRY_BACKOFF_BASE * attempt
-                self.logger.warning(
+                logger.warning(
                     f"🚨 Timeout (attempt {attempt}/{MAX_RETRIES}). Sleeping {wait:.1f}s…",
                     extra={"tag": "retry"}
                 )
                 time.sleep(wait)
                 last_exc = e
             except APIError as e:
-                self.logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
+                logger.error(f"🚨 APIError on attempt {attempt}: {e}", extra={"tag": "fail"})
                 if attempt == MAX_RETRIES:
                     raise
                 time.sleep(RETRY_BACKOFF_BASE ** attempt)
                 last_exc = e
         raise RuntimeError(f"🚨 All {MAX_RETRIES} API retry attempts exhausted.") from last_exc
     
-    def _gpt_json_response(self, system: str, user: str, max_tokens: int = 1500) -> dict:
+    def _gpt_json_response(self, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> dict:
         """wrapper for GPT call with JSON response format."""
         response = self._retry_api_call(
             self.client.chat.completions.create,
@@ -546,7 +541,7 @@ class BaseAIAgent(ABC):
                 {"role": "user", "content": user}
             ],
             max_tokens=max_tokens,
-            temperature=0.2,
+            temperature=temperature,
             response_format={"type": "json_object"}
         )
         raw = (response.choices[0].message.content or "{}").strip()
@@ -554,7 +549,7 @@ class BaseAIAgent(ABC):
         
         try:
             data = json.loads(clean)
-            logger.debug(f"💬 parsed json: {data}")
+            logger.debug(f"🔍 parsed json: {data}")
             return data
         except json.JSONDecodeError as e:
             logger.warning(f"JSONDecodeError: {e} | Attempting extraction. Raw: {raw}")
@@ -564,7 +559,7 @@ class BaseAIAgent(ABC):
             if start != -1 and end != -1 and end > start:
                 try:
                     data = json.loads(clean[start:end+1])
-                    logger.debug(f"💬 recovered json: {data}")
+                    logger.debug(f"🔍 recovered json: {data}")
                     return data
                 except json.JSONDecodeError:
                     pass
@@ -572,7 +567,7 @@ class BaseAIAgent(ABC):
             logger.error("Failed to recover JSON, returning empty dict to prevent crash.")
             return {}
 
-    def _gpt_text_response(self, system: str, user: str, max_tokens: int = 512) -> str:
+    def _gpt_text_response(self, system: str, user: str, max_tokens: int = 800, temperature: float = 0.3) -> str:
         """wrapper for GPT call with plain text response format."""
         response = self._retry_api_call(
             self.client.chat.completions.create,
@@ -582,10 +577,10 @@ class BaseAIAgent(ABC):
                 {"role": "user", "content": user}
             ],
             max_tokens=max_tokens,
-            temperature=0.3
+            temperature=temperature
         )
         res = (response.choices[0].message.content or "").strip()
-        logger.debug(f"💬 raw gpt text response: {res}")
+        logger.debug(f"🔍 raw gpt text response: {res}")
         return res
     
 # ==========================================

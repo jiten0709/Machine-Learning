@@ -316,11 +316,7 @@ class BaseAIAgent(ABC):
         if client is not None:
             self.client = client
         else:
-            self.client = OpenAI(
-                base_url=ENDPOINT,
-                api_key=TOKEN,
-            )
-        self.logger = get_logger(__name__, log_file="mlm.log")
+            self.client = OpenAI(base_url=ENDPOINT, api_key=TOKEN)
     
     @abstractmethod
     def process(self, input_data: Any) -> Any:
@@ -419,7 +415,7 @@ class BaseAIAgent(ABC):
         res = (response.choices[0].message.content or "").strip()
         logger.debug(f"🔍 raw gpt text response: {res}")
         return res
-    
+     
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
