@@ -24,9 +24,14 @@ class StateCheckpointer:
 
     def _load_raw(self) -> Dict:
         p = self._path()
-        if not p.exists():
+        if not p.exists() or p.stat().st_size == 0:
             return {}
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.warning(f"⚠️ Checkpoint file {p.name} is corrupted or invalid. Starting fresh. Error: {e}")
+            return {}
 
     def _save_raw(self, data: Dict) -> None:
         p = self._path()
