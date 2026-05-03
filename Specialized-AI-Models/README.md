@@ -117,6 +117,13 @@ The LLM Agent is a lightweight, production-grade pipeline that transforms raw te
 | **Quantization**          | Compress float32 concept vectors to int8 codes (lossy)              | Scalar quantization + codebook mapping                 |
 | **Output**                | Structured concept graph + generated insight                        | Pydantic output with all stage payloads                |
 
+### 🧠 Agent Capabilities
+
+- **Language-Agnostic Concept Pooling:** Generates per-sentence embeddings and mean-pools them into a unified concept vector, approximating SONAR-style language-agnostic representations without requiring local LASER2/SONAR model weights.
+- **Diffusion-Inspired Refinement:** Employs an iterative loop that injects decaying Gaussian noise into the concept vector and applies L2-normalization as a stabilization proxy — a computationally tractable approximation of diffusion-based concept refinement.
+- **Hidden Process Clustering:** Groups semantically related concept vectors using greedy cosine similarity thresholding and leverages LLM inference to extract cross-cluster emergent insights.
+- **Scalar Quantization:** Compresses continuous 1536-d float32 concept vectors into discrete int8 codes, achieving a 4x memory reduction at the cost of measurable reconstruction error.
+
 ### Use Cases
 
 | Use Case                            | Description                                                                                                                     |
