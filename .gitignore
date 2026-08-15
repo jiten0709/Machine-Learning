@@ -8,8 +8,10 @@
 __pycache__/
 .vscode/
 .DS_Store
+.claude
 
 # my files
 Notes
-Specialized-AI-Models/logs
-Specialized-AI-Models/checkpoints
+specialized-ai-models/logs
+specialized-ai-models/checkpoints
+llm-fine-tuning/linkedin-posts
